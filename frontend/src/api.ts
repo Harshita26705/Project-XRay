@@ -50,11 +50,29 @@ export function analyze(payload: {
   change: {
     source: string;
     title: string;
+    description?: string;
+    reference?: string;
+    author?: string;
     files: { path: string; added_lines: number; removed_lines: number }[];
   };
   run_security: boolean;
 }) {
   return request<AnalysisResult>('/analyze/change', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+}
+
+export function analyzePr(payload: {
+  project_id: string;
+  title?: string;
+  description?: string;
+  reference?: string;
+  author?: string;
+  diff_text: string;
+  run_security: boolean;
+}) {
+  return request<AnalysisResult>('/analyze/pr', {
     method: 'POST',
     body: JSON.stringify(payload)
   });

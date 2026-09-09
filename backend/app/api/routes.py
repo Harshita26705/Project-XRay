@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -11,7 +12,8 @@ from app.analysis.engine import analyse
 from app.contracts.analysis import AnalysisResult
 from app.contracts.change import ChangedFile, ChangeSet
 from app.core.config import get_settings
-from app.core.registry import registry
+from app.core.registry import Project, registry
+from app.ingestion.diff_parser import parse_unified_diff
 from app.reporting.markdown import render
 from app.security import scanners
 from app.sources.change_source import GitDiffChangeSource
@@ -37,7 +39,7 @@ class AnalyzeRequest(BaseModel):
 
 
 @router.get("/health")
-def health() -> dict:
+def health() -> dict[str, Any]:
     """Must succeed with no Azure resource, no AI endpoint and no database."""
     settings = get_settings()
     return {
@@ -49,7 +51,7 @@ def health() -> dict:
 
 
 @router.post("/projects")
-def create_project(request: CreateProjectRequest) -> dict:
+def create_project(request: CreateProjectRequest) -> dict[str, str]:
     root = Path(request.root).expanduser()
     if not root.exists():
         raise HTTPException(status_code=400, detail=f"Path does not exist: {root}")
@@ -64,7 +66,7 @@ def create_project(request: CreateProjectRequest) -> dict:
 
 
 @router.get("/projects")
-def list_projects() -> list[dict]:
+def list_projects() -> list[dict[str, Any]]:
     return [
         {
             "id": p.id,
@@ -79,7 +81,7 @@ def list_projects() -> list[dict]:
 
 
 @router.post("/projects/{project_id}/ingest")
-def ingest(project_id: str) -> dict:
+def ingest(project_id: str) -> dict[str, Any]:
     project = registry.get_project(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Unknown project")
@@ -96,7 +98,7 @@ def ingest(project_id: str) -> dict:
 
 
 @router.get("/projects/{project_id}/graph")
-def get_graph(project_id: str) -> dict:
+def get_graph(project_id: str) -> dict[str, Any]:
     project = registry.get_project(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Unknown project")
@@ -106,33 +108,15 @@ def get_graph(project_id: str) -> dict:
     }
 
 
-@router.post("/analyze/change", response_model=AnalysisResult)
-def analyze_change(request: AnalyzeRequest) -> AnalysisResult:
-    project = registry.get_project(request.project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Unknown project")
+def _run_analysis(project: Project, change: ChangeSet, run_security: bool) -> AnalysisResult:
     if project.build is None:
         raise HTTPException(
             status_code=409, detail="Project has not been ingested. POST /projects/{id}/ingest first."
         )
 
-    if request.change is not None:
-        change = request.change
-    elif request.git_base:
-        try:
-            change = GitDiffChangeSource(
-                project.root, request.git_base, request.git_head
-            ).load()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"git diff failed: {exc}") from exc
-    else:
-        raise HTTPException(
-            status_code=400, detail="Provide either `change` or `git_base`."
-        )
-
     settings = get_settings()
     security = None
-    if request.run_security:
+    if run_security:
         try:
             security = scanners.run(project.root)
         except Exception:
@@ -157,6 +141,62 @@ def analyze_change(request: AnalyzeRequest) -> AnalysisResult:
     return result
 
 
+@router.post("/analyze/change", response_model=AnalysisResult)
+def analyze_change(request: AnalyzeRequest) -> AnalysisResult:
+    project = registry.get_project(request.project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Unknown project")
+
+    if request.change is not None:
+        change = request.change
+    elif request.git_base:
+        try:
+            change = GitDiffChangeSource(
+                project.root, request.git_base, request.git_head
+            ).load()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"git diff failed: {exc}") from exc
+    else:
+        raise HTTPException(
+            status_code=400, detail="Provide either `change` or `git_base`."
+        )
+
+    return _run_analysis(project, change, request.run_security)
+
+
+class PrDiffRequest(BaseModel):
+    project_id: str
+    title: str = ""
+    description: str = ""
+    reference: str | None = None
+    author: str | None = None
+    diff_text: str
+    run_security: bool = True
+
+
+@router.post("/analyze/pr", response_model=AnalysisResult)
+def analyze_pr(request: PrDiffRequest) -> AnalysisResult:
+    project = registry.get_project(request.project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Unknown project")
+
+    files = parse_unified_diff(request.diff_text)
+    if not files:
+        raise HTTPException(
+            status_code=400, detail="No file changes could be extracted from the supplied diff."
+        )
+
+    change = ChangeSet(
+        source="pull-request",
+        title=request.title or (request.reference or "Pull request"),
+        description=request.description,
+        reference=request.reference,
+        author=request.author,
+        files=files,
+    )
+    return _run_analysis(project, change, request.run_security)
+
+
 @router.get("/analysis/{analysis_id}", response_model=AnalysisResult)
 def get_analysis(analysis_id: str) -> AnalysisResult:
     result = registry.get_analysis(analysis_id)
@@ -166,7 +206,7 @@ def get_analysis(analysis_id: str) -> AnalysisResult:
 
 
 @router.get("/reports/{analysis_id}")
-def get_report(analysis_id: str) -> dict:
+def get_report(analysis_id: str) -> dict[str, str]:
     result = registry.get_analysis(analysis_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Unknown analysis")
