@@ -25,7 +25,7 @@ public record AnalysisScopeRequest(
     bool IncludeExternalBindings = true,
     bool RunStaticSecurityAnalysis = true);
 
-public record CreateAnalysisRequest(Guid ChangeId, AnalysisScopeRequest? Scope);
+public record CreateAnalysisRequest(Guid ChangeId, AnalysisScopeRequest? Scope, string? BranchName);
 
 public record AnalysisNodeResultResponse(
     Guid GraphNodeId,
@@ -43,6 +43,7 @@ public record AnalysisResponse(
     string ChangeTitle,
     string Status,
     string? OverallRiskState,
+    string? BranchName,
     int CriticalCount,
     int RiskyCount,
     int SafeCount,

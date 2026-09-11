@@ -16,6 +16,9 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddHttpClient();
 builder.Services.AddScoped<XRay.Api.Services.ICurrentUserService, XRay.Api.Services.CurrentUserService>();
 builder.Services.AddScoped<XRay.Api.Services.ProjectService>();
+builder.Services.AddSingleton<XRay.Api.Services.Repositories.IRepositoryProvider, XRay.Api.Services.Repositories.LocalRepositoryProvider>();
+builder.Services.AddSingleton<XRay.Api.Services.Repositories.IRepositoryProvider, XRay.Api.Services.Repositories.AzureDevOpsRepositoryProvider>();
+builder.Services.AddSingleton<XRay.Api.Services.Repositories.RepositoryProviderFactory>();
 builder.Services.AddScoped<XRay.Api.Services.IngestionService>();
 builder.Services.AddScoped<XRay.Api.Services.ChangeService>();
 builder.Services.AddScoped<XRay.Api.Services.SecurityScanService>();

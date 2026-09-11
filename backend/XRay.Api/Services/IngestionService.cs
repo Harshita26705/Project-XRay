@@ -1,29 +1,35 @@
 using Microsoft.EntityFrameworkCore;
 using XRay.Api.Contracts;
+using XRay.Api.Services.Repositories;
+using XRay.Domain.Changes;
 using XRay.Domain.Graph;
 using XRay.Domain.Ingestion;
+using XRay.Domain.Projects;
 using XRay.Infrastructure.Persistence;
 using XRay.Parsers;
 
 namespace XRay.Api.Services;
 
 /// <summary>
-/// Walks a local repository path (schema.md models real repo hosting; this demo ingests from disk
-/// rather than cloning from Azure DevOps), runs the C#/TypeScript/SQL parsers, and materializes the
-/// result as a new current <see cref="GraphSnapshot"/>. Unresolved edge targets become EXTERNAL
-/// placeholder nodes, mirroring the original Python builder's behavior.
+/// Resolves the right <see cref="IRepositoryProvider"/> for a repository (local disk vs. Azure
+/// DevOps), lists/reads its files for the requested branch, runs the C#/TypeScript/SQL parsers, and
+/// materializes the result as a new current <see cref="GraphSnapshot"/> for that branch. Unresolved
+/// edge targets become EXTERNAL placeholder nodes, mirroring the original Python builder's behavior.
 /// </summary>
 public class IngestionService
 {
-    private static readonly string[] IgnoredSegments = { "node_modules", "bin", "obj", ".git", "dist", "build" };
     private readonly AppDbContext _db;
+    private readonly RepositoryProviderFactory _providerFactory;
+    private readonly IConfiguration _configuration;
     private readonly CSharpParser _csharpParser = new();
     private readonly TypeScriptParser _tsParser = new();
     private readonly SqlParser _sqlParser = new();
 
-    public IngestionService(AppDbContext db)
+    public IngestionService(AppDbContext db, RepositoryProviderFactory providerFactory, IConfiguration configuration)
     {
         _db = db;
+        _providerFactory = providerFactory;
+        _configuration = configuration;
     }
 
     public async Task<IngestResponse> IngestAsync(Guid projectId, IngestRequest request, CancellationToken ct = default)
@@ -36,11 +42,29 @@ public class IngestionService
             repository.CloneUrl = $"file:///{request.LocalRepositoryPath.Replace('\\', '/')}";
         }
 
-        var rootPath = ResolveLocalPath(repository.CloneUrl)
-                       ?? throw new InvalidOperationException("No local repository path configured for this project.");
-        if (!Directory.Exists(rootPath))
+        var connection = BuildConnectionInfo(repository);
+        var provider = _providerFactory.Resolve(connection.ProviderCode);
+
+        var validation = await provider.ValidateAsync(connection, ct);
+        if (!validation.IsValid)
         {
-            throw new DirectoryNotFoundException($"Repository path not found: {rootPath}");
+            throw new InvalidOperationException(validation.ErrorMessage ?? "Repository validation failed.");
+        }
+
+        var branchName = request.BranchName ?? repository.DefaultBranchName ?? "main";
+        var branch = await GetOrCreateBranchAsync(repository, branchName, ct);
+
+        var headSha = await SafeGetHeadCommitAsync(provider, connection, branchName, ct);
+        if (!string.IsNullOrWhiteSpace(headSha))
+        {
+            var commit = await _db.Commits.FirstOrDefaultAsync(c => c.RepositoryId == repository.RepositoryId && c.CommitHash == headSha, ct);
+            if (commit is null)
+            {
+                commit = new Commit { CommitId = Guid.NewGuid(), RepositoryId = repository.RepositoryId, CommitHash = headSha, CommittedAtUtc = DateTime.UtcNow };
+                _db.Commits.Add(commit);
+                await _db.SaveChangesAsync(ct);
+            }
+            branch.LastIndexedCommitId = commit.CommitId;
         }
 
         var run = new IngestionRun
@@ -48,6 +72,7 @@ public class IngestionService
             IngestionRunId = Guid.NewGuid(),
             ProjectId = projectId,
             RepositoryId = repository.RepositoryId,
+            BranchId = branch.BranchId,
             TriggerType = "MANUAL",
             StartedAtUtc = DateTime.UtcNow,
             StatusCode = "RUNNING",
@@ -55,10 +80,7 @@ public class IngestionService
         _db.IngestionRuns.Add(run);
         await _db.SaveChangesAsync(ct);
 
-        var files = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories)
-            .Where(f => !IgnoredSegments.Any(seg => f.Replace('\\', '/').Contains($"/{seg}/", StringComparison.OrdinalIgnoreCase)))
-            .Where(f => f.EndsWith(".cs") || f.EndsWith(".ts") || f.EndsWith(".tsx") || f.EndsWith(".sql"))
-            .ToList();
+        var files = await provider.ListFilesAsync(connection, branchName, ct);
 
         var allNodes = new Dictionary<string, ParsedNode>();
         var allEdges = new List<ParsedEdge>();
@@ -68,11 +90,11 @@ public class IngestionService
 
         foreach (var file in files)
         {
-            var relative = Path.GetRelativePath(rootPath, file).Replace('\\', '/');
+            var relative = file.RelativePath;
             string text;
             try
             {
-                text = await File.ReadAllTextAsync(file, ct);
+                text = await provider.GetFileContentAsync(connection, branchName, relative, ct);
             }
             catch (Exception ex)
             {
@@ -119,14 +141,18 @@ public class IngestionService
             }
         }
 
-        // Retire the previous current snapshot and create a new one.
-        var previousCurrent = await _db.GraphSnapshots.Where(s => s.ProjectId == projectId && s.IsCurrent).ToListAsync(ct);
+        // Retire the previous current snapshot *for this branch only* — other branches keep their
+        // own current snapshot untouched (branch isolation, see Figma/update.md Workstream C).
+        var previousCurrent = await _db.GraphSnapshots
+            .Where(s => s.ProjectId == projectId && s.BranchId == branch.BranchId && s.IsCurrent)
+            .ToListAsync(ct);
         foreach (var prev in previousCurrent) prev.IsCurrent = false;
 
         var snapshot = new GraphSnapshot
         {
             GraphSnapshotId = Guid.NewGuid(),
             ProjectId = projectId,
+            BranchId = branch.BranchId,
             IngestionRunId = run.IngestionRunId,
             IsCurrent = true,
             CreatedAtUtc = DateTime.UtcNow,
@@ -223,6 +249,96 @@ public class IngestionService
         await _db.SaveChangesAsync(ct);
 
         return new IngestResponse(run.IngestionRunId, files.Count, parsedCount, failedCount, allNodes.Count, edgeCreated, errors);
+    }
+
+    public async Task<IReadOnlyList<BranchInfo>> ListBranchesAsync(Guid projectId, CancellationToken ct = default)
+    {
+        var repository = await _db.Repositories.FirstOrDefaultAsync(r => r.ProjectId == projectId, ct)
+                          ?? throw new InvalidOperationException("Project has no repository configured.");
+        var connection = BuildConnectionInfo(repository);
+        var provider = _providerFactory.Resolve(connection.ProviderCode);
+        return await provider.ListBranchesAsync(connection, ct);
+    }
+
+    private async Task<Branch> GetOrCreateBranchAsync(Repository repository, string branchName, CancellationToken ct)
+    {
+        var branch = await _db.Branches.FirstOrDefaultAsync(b => b.RepositoryId == repository.RepositoryId && b.Name == branchName, ct);
+        if (branch is not null) return branch;
+
+        branch = new Branch
+        {
+            BranchId = Guid.NewGuid(),
+            RepositoryId = repository.RepositoryId,
+            Name = branchName,
+            IsDefault = branchName == (repository.DefaultBranchName ?? "main"),
+            CreatedAtUtc = DateTime.UtcNow,
+        };
+        _db.Branches.Add(branch);
+
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // Idempotency: a concurrent ingest/branch-list request already created this branch.
+            _db.ChangeTracker.Clear();
+            return await _db.Branches.FirstAsync(b => b.RepositoryId == repository.RepositoryId && b.Name == branchName, ct);
+        }
+        return branch;
+    }
+
+    private static async Task<string?> SafeGetHeadCommitAsync(IRepositoryProvider provider, RepositoryConnectionInfo connection, string branchName, CancellationToken ct)
+    {
+        try
+        {
+            var sha = await provider.GetHeadCommitAsync(connection, branchName, ct);
+            return string.IsNullOrWhiteSpace(sha) ? null : sha;
+        }
+        catch
+        {
+            return null; // best-effort — a repo with no git history (or REST hiccup) shouldn't block ingestion
+        }
+    }
+
+    private RepositoryConnectionInfo BuildConnectionInfo(Repository repository)
+    {
+        var cloneUrl = repository.CloneUrl ?? "";
+
+        if (cloneUrl.Contains("_git/", StringComparison.OrdinalIgnoreCase) || cloneUrl.Contains("dev.azure.com", StringComparison.OrdinalIgnoreCase))
+        {
+            var (orgUrl, project, repoName) = ParseAzureDevOpsUrl(cloneUrl);
+            return new RepositoryConnectionInfo(
+                "AZURE_DEVOPS",
+                OrganizationUrl: orgUrl,
+                ProjectName: project,
+                RepositoryName: repoName,
+                PersonalAccessToken: _configuration["AzureDevOps:PersonalAccessToken"]);
+        }
+
+        var localPath = ResolveLocalPath(cloneUrl)
+                         ?? throw new InvalidOperationException("No local repository path or Azure DevOps URL configured for this project.");
+        if (!Directory.Exists(localPath))
+        {
+            throw new DirectoryNotFoundException($"Repository path not found: {localPath}");
+        }
+        return new RepositoryConnectionInfo("LOCAL", RootPath: localPath);
+    }
+
+    /// <summary>Parses "https://dev.azure.com/{org}/{project}/_git/{repo}" into its three parts.</summary>
+    private static (string OrgUrl, string Project, string Repo) ParseAzureDevOpsUrl(string cloneUrl)
+    {
+        var uri = new Uri(cloneUrl);
+        var segments = uri.AbsolutePath.Trim('/').Split('/');
+        var gitIndex = Array.IndexOf(segments, "_git");
+        if (gitIndex < 2 || gitIndex + 1 >= segments.Length)
+        {
+            throw new InvalidOperationException($"Could not parse Azure DevOps repository URL: {cloneUrl}");
+        }
+        var org = segments[0];
+        var project = segments[gitIndex - 1];
+        var repo = segments[gitIndex + 1];
+        return ($"{uri.Scheme}://{uri.Host}/{org}", project, repo);
     }
 
     private static string? ResolveLocalPath(string? cloneUrl)

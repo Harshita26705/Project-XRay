@@ -21,7 +21,9 @@ public record GraphEdgeResponse(Guid EdgeId, Guid SourceNodeId, Guid TargetNodeI
 
 public record GraphResponse(Guid? SnapshotId, IReadOnlyList<GraphNodeResponse> Nodes, IReadOnlyList<GraphEdgeResponse> Edges);
 
-public record IngestRequest(string? LocalRepositoryPath);
+public record IngestRequest(string? LocalRepositoryPath, string? BranchName);
+
+public record BranchResponse(string Name, string? HeadCommitSha, bool IsDefault, bool IsIndexed);
 
 public record IngestResponse(Guid IngestionRunId, int FilesDiscovered, int FilesParsed, int FilesFailed, int NodesCreated, int EdgesCreated, IReadOnlyList<string> Errors);
 

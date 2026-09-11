@@ -8,6 +8,8 @@ public class GraphSnapshot
     public Guid GraphSnapshotId { get; set; }
     public Guid ProjectId { get; set; }
     public Project? Project { get; set; }
+    public Guid? BranchId { get; set; }
+    public Branch? Branch { get; set; }
     public Guid IngestionRunId { get; set; }
     public IngestionRun? IngestionRun { get; set; }
     public bool IsCurrent { get; set; } = true;

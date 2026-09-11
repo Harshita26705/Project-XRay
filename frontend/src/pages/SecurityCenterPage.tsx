@@ -4,6 +4,7 @@ import { useProjects } from '../state/ProjectContext';
 import type { SecurityFindingResponse } from '../api/types';
 import { Card } from '../components/Card';
 import { StatusBadge } from '../components/StatusBadge';
+import { FilterSelect } from '../components/FilterSelect';
 import { EmptyState } from '../components/States';
 
 const SEVERITY_COLOR: Record<string, string> = {
@@ -18,6 +19,8 @@ export default function SecurityCenterPage() {
   const { currentProject } = useProjects();
   const [findings, setFindings] = useState<SecurityFindingResponse[]>([]);
   const [selected, setSelected] = useState<SecurityFindingResponse | null>(null);
+  const [severityFilter, setSeverityFilter] = useState('ALL');
+  const [statusFilter, setStatusFilter] = useState('ALL');
 
   useEffect(() => {
     if (!currentProject) return;
@@ -33,6 +36,12 @@ export default function SecurityCenterPage() {
     safe: findings.filter((f) => f.severity === 'LOW').length,
     unknown: findings.filter((f) => f.severity === 'INFO').length
   };
+
+  const filtered = findings.filter((f) => {
+    if (severityFilter !== 'ALL' && f.severity !== severityFilter) return false;
+    if (statusFilter !== 'ALL' && f.status !== statusFilter) return false;
+    return true;
+  });
 
   return (
     <div className="space-y-5">
@@ -50,8 +59,14 @@ export default function SecurityCenterPage() {
 
       <div className="grid grid-cols-3 gap-5">
         <Card className="col-span-2">
-          <div className="border-b border-border px-4 py-3 text-sm font-semibold">Architecture Vulnerabilities</div>
-          {findings.length === 0 ? (
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <span className="text-sm font-semibold">Architecture Vulnerabilities</span>
+            <div className="flex gap-2">
+              <FilterSelect value={severityFilter} onChange={setSeverityFilter} label="Severity" options={['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']} />
+              <FilterSelect value={statusFilter} onChange={setStatusFilter} label="Status" options={['ALL', 'OPEN', 'RESOLVED']} />
+            </div>
+          </div>
+          {filtered.length === 0 ? (
             <div className="p-5"><EmptyState title="No security findings" message="Compliance details and secret disclosures will populate here after running a scan." /></div>
           ) : (
             <table className="w-full text-left text-sm">
@@ -64,7 +79,7 @@ export default function SecurityCenterPage() {
                 </tr>
               </thead>
               <tbody>
-                {findings.map((f) => (
+                {filtered.map((f) => (
                   <tr key={f.securityFindingId} onClick={() => setSelected(f)} className="cursor-pointer border-b border-border/60 last:border-0 hover:bg-cardMuted/50">
                     <td className="px-4 py-2.5">{f.title}</td>
                     <td className={`px-4 py-2.5 font-semibold ${SEVERITY_COLOR[f.severity]}`}>{f.severity}</td>

@@ -16,6 +16,8 @@ public class Analysis
     public Change? Change { get; set; }
     public Guid? GraphSnapshotId { get; set; }
     public GraphSnapshot? GraphSnapshot { get; set; }
+    public Guid? BranchId { get; set; }
+    public XRay.Domain.Projects.Branch? Branch { get; set; }
     public Guid? EnvironmentId { get; set; }
     public ProjectEnvironment? Environment { get; set; }
     public byte AnalysisStatusId { get; set; }

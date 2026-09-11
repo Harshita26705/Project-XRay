@@ -1,4 +1,5 @@
-const API_BASE = 'http://localhost:5006/api';
+// Empty string means "use the Vite dev proxy" (relative /api/... requests) — see vite.config.ts.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '/api';
 
 let tokenGetter: (() => Promise<string | null>) | null = null;
 

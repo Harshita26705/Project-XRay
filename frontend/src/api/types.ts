@@ -173,6 +173,7 @@ export interface ReportResponse {
   title: string;
   format: string;
   createdAtUtc: string;
+  overallRiskState: string | null;
   sections: ReportSectionResponse[];
 }
 

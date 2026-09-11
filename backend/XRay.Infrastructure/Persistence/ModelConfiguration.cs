@@ -116,7 +116,7 @@ public static class ModelConfiguration
         b.Entity<Project>(e =>
         {
             e.HasKey(x => x.ProjectId);
-            e.HasIndex(x => new { x.OrganizationId, x.Name });
+            e.HasIndex(x => new { x.OrganizationId, x.Name }).IsUnique().HasFilter("[IsActive] = 1");
             e.HasOne(x => x.Organization).WithMany().HasForeignKey(x => x.OrganizationId);
             e.HasOne(x => x.CreatedByUser).WithMany().HasForeignKey(x => x.CreatedByUserId);
             e.Property(x => x.RowVersion).IsRowVersion();
@@ -195,7 +195,11 @@ public static class ModelConfiguration
         {
             e.HasKey(x => x.GraphSnapshotId);
             e.HasOne(x => x.Project).WithMany().HasForeignKey(x => x.ProjectId);
+            e.HasOne(x => x.Branch).WithMany().HasForeignKey(x => x.BranchId);
             e.HasOne(x => x.IngestionRun).WithMany().HasForeignKey(x => x.IngestionRunId);
+            // "Current" snapshot is scoped per branch, not per project — each branch keeps its own
+            // isolated current graph (Figma/update.md Workstream C mandatory isolation rule).
+            e.HasIndex(x => new { x.ProjectId, x.BranchId }).IsUnique().HasFilter("[IsCurrent] = 1");
         });
 
         b.Entity<GraphNode>(e =>
@@ -278,6 +282,7 @@ public static class ModelConfiguration
             e.HasOne(x => x.Project).WithMany().HasForeignKey(x => x.ProjectId);
             e.HasOne(x => x.Change).WithMany().HasForeignKey(x => x.ChangeId);
             e.HasOne(x => x.GraphSnapshot).WithMany().HasForeignKey(x => x.GraphSnapshotId);
+            e.HasOne(x => x.Branch).WithMany().HasForeignKey(x => x.BranchId);
             e.HasOne(x => x.Environment).WithMany().HasForeignKey(x => x.EnvironmentId);
             e.HasOne<AnalysisStatus>().WithMany().HasForeignKey(x => x.AnalysisStatusId);
             e.HasOne<RiskState>().WithMany().HasForeignKey(x => x.OverallRiskStateId);
