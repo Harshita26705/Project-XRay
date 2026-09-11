@@ -14,6 +14,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("Default")));
 
 builder.Services.AddHttpClient();
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<XRay.Api.Services.ICurrentUserService, XRay.Api.Services.CurrentUserService>();
 builder.Services.AddScoped<XRay.Api.Services.ProjectService>();
 builder.Services.AddScoped<XRay.Api.Services.IngestionService>();
@@ -22,6 +23,7 @@ builder.Services.AddScoped<XRay.Api.Services.SecurityScanService>();
 builder.Services.AddScoped<XRay.Api.Services.AnalysisService>();
 builder.Services.AddScoped<XRay.Api.Services.ReportService>();
 builder.Services.AddScoped<XRay.Api.Services.IntegrationService>();
+builder.Services.AddScoped<XRay.Api.Services.AzureDevOpsService>();
 builder.Services.AddScoped<XRay.Api.Services.AiExplanationService>();
 builder.Services.AddScoped<XRay.Api.Services.NotificationService>();
 builder.Services.AddScoped<XRay.Api.Services.SettingsService>();

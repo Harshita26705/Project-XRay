@@ -16,6 +16,7 @@ const PROVIDERS: { code: string; name: string; purpose: string; readOnly?: boole
 
 export default function IntegrationsPage() {
   const [connections, setConnections] = useState<IntegrationConnectionResponse[]>([]);
+  const [baseUrls, setBaseUrls] = useState<Record<string, string>>({});
 
   const load = () => void api.listIntegrations().then(setConnections);
   useEffect(load, []);
@@ -23,7 +24,9 @@ export default function IntegrationsPage() {
   const ensure = async (provider: string, name: string) => {
     let connection = connections.find((c) => c.provider === provider);
     if (!connection) {
-      connection = await api.upsertIntegration({ provider, displayName: name });
+      connection = await api.upsertIntegration({ provider, displayName: name, externalBaseUrl: baseUrls[provider] || undefined });
+    } else if (baseUrls[provider] !== undefined) {
+      connection = await api.upsertIntegration({ provider, displayName: name, externalBaseUrl: baseUrls[provider] || undefined });
     }
     await api.testIntegration(connection.integrationConnectionId);
     load();
@@ -46,6 +49,14 @@ export default function IntegrationsPage() {
                 <StatusBadge status={connection?.status ?? 'NOT_CONNECTED'} />
               </div>
               <p className="mt-1 text-xs text-text-muted">{p.purpose}</p>
+              {p.code === 'AZURE_DEVOPS' && (
+                <input
+                  value={baseUrls[p.code] ?? connection?.externalBaseUrl ?? ''}
+                  onChange={(event) => setBaseUrls((current) => ({ ...current, [p.code]: event.target.value }))}
+                  placeholder="https://dev.azure.com/your-organization"
+                  className="mt-3 w-full rounded border border-border bg-cardMuted px-2 py-1.5 text-xs"
+                />
+              )}
               {p.readOnly && <span className="mt-2 inline-block rounded border border-border px-1.5 py-0.5 text-[10px] text-text-secondary">READ-ONLY</span>}
               <div className="mt-3">
                 <Button onClick={() => ensure(p.code, p.name)}>Test Connection</Button>

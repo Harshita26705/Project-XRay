@@ -48,6 +48,19 @@ export interface IngestResponse {
   errors: string[];
 }
 
+export interface AzureDevOpsRepositoryResponse {
+  id: string;
+  name: string;
+  webUrl: string | null;
+  defaultBranch: string | null;
+}
+
+export interface AzureDevOpsBranchResponse {
+  name: string;
+  objectId: string | null;
+  isDefault: boolean;
+}
+
 export interface RecentAnalysisResponse {
   analysisId: string;
   changeTitle: string;
@@ -183,6 +196,7 @@ export interface IntegrationConnectionResponse {
   status: string;
   lastTestedAtUtc: string | null;
   isEnabled: boolean;
+  externalBaseUrl: string | null;
 }
 
 export interface AiConfigurationResponse {

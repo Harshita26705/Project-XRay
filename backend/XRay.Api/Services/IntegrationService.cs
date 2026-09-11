@@ -27,7 +27,7 @@ public class IntegrationService
         var providers = await _db.IntegrationProviders.ToDictionaryAsync(p => p.Id, p => p.Code, ct);
         var connections = await _db.IntegrationConnections.Where(c => c.OrganizationId == organizationId).ToListAsync(ct);
         return connections.Select(c => new IntegrationConnectionResponse(
-            c.IntegrationConnectionId, providers.GetValueOrDefault(c.IntegrationProviderId, "UNKNOWN"), c.DisplayName, c.StatusCode, c.LastTestedAtUtc, c.IsEnabled)).ToList();
+            c.IntegrationConnectionId, providers.GetValueOrDefault(c.IntegrationProviderId, "UNKNOWN"), c.DisplayName, c.StatusCode, c.LastTestedAtUtc, c.IsEnabled, c.ExternalBaseUrl)).ToList();
     }
 
     public async Task<IntegrationConnectionResponse> CreateOrUpdateAsync(Guid organizationId, CreateIntegrationRequest request, CancellationToken ct = default)
@@ -58,7 +58,7 @@ public class IntegrationService
         connection.UpdatedAtUtc = DateTime.UtcNow;
 
         await _db.SaveChangesAsync(ct);
-        return new IntegrationConnectionResponse(connection.IntegrationConnectionId, request.Provider, connection.DisplayName, connection.StatusCode, connection.LastTestedAtUtc, connection.IsEnabled);
+        return new IntegrationConnectionResponse(connection.IntegrationConnectionId, request.Provider, connection.DisplayName, connection.StatusCode, connection.LastTestedAtUtc, connection.IsEnabled, connection.ExternalBaseUrl);
     }
 
     public async Task<IntegrationConnectionResponse> TestConnectionAsync(Guid connectionId, CancellationToken ct = default)
@@ -78,7 +78,7 @@ public class IntegrationService
         connection.LastError = ok ? null : "Could not reach the configured endpoint.";
         await _db.SaveChangesAsync(ct);
 
-        return new IntegrationConnectionResponse(connection.IntegrationConnectionId, providerCode, connection.DisplayName, connection.StatusCode, connection.LastTestedAtUtc, connection.IsEnabled);
+        return new IntegrationConnectionResponse(connection.IntegrationConnectionId, providerCode, connection.DisplayName, connection.StatusCode, connection.LastTestedAtUtc, connection.IsEnabled, connection.ExternalBaseUrl);
     }
 
     private async Task<bool> ProbeHttpEndpointAsync(string? baseUrl, CancellationToken ct)

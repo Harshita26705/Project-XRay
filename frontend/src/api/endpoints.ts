@@ -3,6 +3,8 @@ import type {
   ProjectResponse,
   GraphResponse,
   IngestResponse,
+  AzureDevOpsRepositoryResponse,
+  AzureDevOpsBranchResponse,
   OverviewResponse,
   ChangeResponse,
   CreateChangeRequest,
@@ -32,6 +34,8 @@ export const api = {
     post<IngestResponse>(`/projects/${projectId}/ingest`, { localRepositoryPath }),
   getGraph: (projectId: string) => get<GraphResponse>(`/projects/${projectId}/graph`),
   getOverview: () => get<OverviewResponse>('/projects/overview'),
+  listAzureDevOpsRepositories: () => get<AzureDevOpsRepositoryResponse[]>('/azure-devops/repositories'),
+  listAzureDevOpsBranches: (repositoryId: string) => get<AzureDevOpsBranchResponse[]>(`/azure-devops/repositories/${encodeURIComponent(repositoryId)}/branches`),
 
   listChanges: (projectId: string) => get<ChangeResponse[]>(`/projects/${projectId}/changes`),
   getChange: (changeId: string) => get<ChangeResponse>(`/changes/${changeId}`),

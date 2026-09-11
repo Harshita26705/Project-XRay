@@ -60,7 +60,7 @@ public class IngestionService
             .Where(f => f.EndsWith(".cs") || f.EndsWith(".ts") || f.EndsWith(".tsx") || f.EndsWith(".sql"))
             .ToList();
 
-        var allNodes = new Dictionary<string, ParsedNode>();
+        var allNodes = new Dictionary<string, ParsedNode>(StringComparer.OrdinalIgnoreCase);
         var allEdges = new List<ParsedEdge>();
         var errors = new List<string>();
         var parsedCount = 0;
@@ -68,7 +68,7 @@ public class IngestionService
 
         foreach (var file in files)
         {
-            var relative = Path.GetRelativePath(rootPath, file).Replace('\\', '/');
+            var relative = NormalizePath(Path.GetRelativePath(rootPath, file));
             string text;
             try
             {
@@ -101,9 +101,19 @@ public class IngestionService
 
             foreach (var node in result.Nodes)
             {
-                allNodes[node.ExternalKey] = node; // last-writer-wins merge, consistent with old builder
+                var normalizedKey = NormalizeExternalKey(node.ExternalKey);
+                allNodes[normalizedKey] = node with
+                {
+                    ExternalKey = normalizedKey,
+                    RelativeFilePath = node.RelativeFilePath is null ? null : NormalizePath(node.RelativeFilePath)
+                }; // last-writer-wins merge, consistent with old builder
             }
-            allEdges.AddRange(result.Edges);
+            allEdges.AddRange(result.Edges.Select(edge => edge with
+            {
+                SourceExternalKey = NormalizeExternalKey(edge.SourceExternalKey),
+                TargetExternalKey = NormalizeExternalKey(edge.TargetExternalKey),
+                RelativeFilePath = edge.RelativeFilePath is null ? null : NormalizePath(edge.RelativeFilePath)
+            }));
         }
 
         // Materialize unresolved edge targets/sources as EXTERNAL placeholder nodes.
@@ -137,7 +147,7 @@ public class IngestionService
         var edgeTypeIds = await _db.GraphEdgeTypes.ToDictionaryAsync(e => e.Code, e => e.Id, ct);
 
         var nodeIdByKey = new Dictionary<string, Guid>();
-        var codeFileIdByPath = new Dictionary<string, Guid>();
+        var codeFileIdByPath = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (key, parsed) in allNodes)
         {
@@ -232,4 +242,18 @@ public class IngestionService
             ? cloneUrl["file:///".Length..].Replace('/', Path.DirectorySeparatorChar)
             : null;
     }
+
+    private static string NormalizePath(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        while (normalized.StartsWith("./", StringComparison.Ordinal))
+        {
+            normalized = normalized[2..];
+        }
+
+        return normalized;
+    }
+
+    private static string NormalizeExternalKey(string key) =>
+        key.Trim().Replace('\\', '/');
 }

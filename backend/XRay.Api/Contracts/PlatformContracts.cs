@@ -6,7 +6,8 @@ public record IntegrationConnectionResponse(
     string DisplayName,
     string Status,
     DateTime? LastTestedAtUtc,
-    bool IsEnabled);
+    bool IsEnabled,
+    string? ExternalBaseUrl);
 
 public record CreateIntegrationRequest(string Provider, string DisplayName, string? ExternalBaseUrl, string? ExternalTenantId);
 

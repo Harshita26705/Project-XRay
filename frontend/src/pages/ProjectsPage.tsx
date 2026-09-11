@@ -12,13 +12,18 @@ export default function ProjectsPage() {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState('CGOne');
   const [path, setPath] = useState('D:\\Hackathon\\Project-XRay\\demo-app');
+  const [azureDevOpsUrl, setAzureDevOpsUrl] = useState('');
   const [busy, setBusy] = useState(false);
 
   const handleCreate = async () => {
     setBusy(true);
     try {
-      const created = await api.createProject({ name, localRepositoryPath: path });
-      await api.ingest(created.projectId, path);
+      const created = await api.createProject({
+        name,
+        localRepositoryPath: path || undefined,
+        externalProjectUrl: azureDevOpsUrl || undefined
+      });
+      if (path) await api.ingest(created.projectId, path);
       await refresh();
       setCurrentProjectId(created.projectId);
       setShowForm(false);
@@ -50,10 +55,14 @@ export default function ProjectsPage() {
               Local repository path
               <input value={path} onChange={(e) => setPath(e.target.value)} className="mt-1 w-full rounded border border-border bg-cardMuted px-2 py-1.5 text-sm" />
             </label>
+            <label className="text-xs text-text-secondary">
+              Azure DevOps repository URL
+              <input value={azureDevOpsUrl} onChange={(e) => setAzureDevOpsUrl(e.target.value)} placeholder="https://dev.azure.com/org/project/_git/repo" className="mt-1 w-full rounded border border-border bg-cardMuted px-2 py-1.5 text-sm" />
+            </label>
           </div>
           <div className="mt-3 flex gap-2">
             <Button variant="primary" onClick={handleCreate} disabled={busy}>
-              {busy ? 'Creating & Ingesting...' : 'Create & Ingest'}
+              {busy ? 'Connecting...' : 'Connect Project'}
             </Button>
             <Button onClick={() => setShowForm(false)}>Cancel</Button>
           </div>
