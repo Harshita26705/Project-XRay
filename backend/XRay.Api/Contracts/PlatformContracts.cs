@@ -39,6 +39,7 @@ public record ReportResponse(
     string Title,
     string Format,
     DateTime CreatedAtUtc,
+    string? OverallRiskState,
     IReadOnlyList<ReportSectionResponse> Sections);
 
 public record ReportSectionResponse(string SectionType, string Title, string? Content, int SortOrder);

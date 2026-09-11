@@ -38,6 +38,15 @@ public class ProjectService
 
     public async Task<ProjectResponse> CreateAsync(Guid organizationId, Guid createdByUserId, CreateProjectRequest request, CancellationToken ct = default)
     {
+        // Idempotent by (OrganizationId, Name): repeated "Create & Ingest" clicks (double-submit,
+        // retried requests) must return the existing project instead of creating a duplicate.
+        var existing = await _db.Projects.FirstOrDefaultAsync(
+            p => p.OrganizationId == organizationId && p.Name == request.Name && p.IsActive, ct);
+        if (existing is not null)
+        {
+            return await ToResponseAsync(existing, ct);
+        }
+
         var project = new Project
         {
             ProjectId = Guid.NewGuid(),
@@ -74,7 +83,20 @@ public class ProjectService
             CreatedAtUtc = DateTime.UtcNow,
         });
 
-        await _db.SaveChangesAsync(ct);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // Idempotency under a concurrent create race: another request created the same
+            // (OrganizationId, Name) project between our existence check and this insert.
+            _db.ChangeTracker.Clear();
+            var winner = await _db.Projects.FirstOrDefaultAsync(
+                p => p.OrganizationId == organizationId && p.Name == request.Name && p.IsActive, ct);
+            if (winner is null) throw;
+            return await ToResponseAsync(winner, ct);
+        }
         return await ToResponseAsync(project, ct);
     }
 

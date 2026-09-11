@@ -48,6 +48,25 @@ public class ProjectsController : ControllerBase
         return CreatedAtAction(nameof(Get), new { projectId = created.ProjectId }, created);
     }
 
+    [HttpGet("{projectId:guid}/branches")]
+    public async Task<ActionResult<IReadOnlyList<BranchResponse>>> ListBranches(Guid projectId, CancellationToken ct)
+    {
+        try
+        {
+            var branches = await _ingestion.ListBranchesAsync(projectId, ct);
+            var indexedNames = await _db.GraphSnapshots
+                .Where(s => s.ProjectId == projectId && s.IsCurrent && s.Branch != null)
+                .Select(s => s.Branch!.Name)
+                .ToListAsync(ct);
+
+            return Ok(branches.Select(b => new BranchResponse(b.Name, string.IsNullOrEmpty(b.HeadCommitSha) ? null : b.HeadCommitSha, b.IsDefault, indexedNames.Contains(b.Name))).ToList());
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or DirectoryNotFoundException)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     [HttpPost("{projectId:guid}/ingest")]
     public async Task<ActionResult<IngestResponse>> Ingest(Guid projectId, IngestRequest request, CancellationToken ct)
     {
@@ -62,9 +81,14 @@ public class ProjectsController : ControllerBase
     }
 
     [HttpGet("{projectId:guid}/graph")]
-    public async Task<ActionResult<GraphResponse>> GetGraph(Guid projectId, CancellationToken ct)
+    public async Task<ActionResult<GraphResponse>> GetGraph(Guid projectId, [FromQuery] string? branch, CancellationToken ct)
     {
-        var snapshot = await _db.GraphSnapshots.Where(s => s.ProjectId == projectId && s.IsCurrent).FirstOrDefaultAsync(ct);
+        var snapshotQuery = _db.GraphSnapshots.Where(s => s.ProjectId == projectId && s.IsCurrent);
+        snapshotQuery = branch is null
+            ? snapshotQuery.Where(s => s.Branch!.IsDefault || s.BranchId == null)
+            : snapshotQuery.Where(s => s.Branch!.Name == branch);
+        var snapshot = await snapshotQuery.FirstOrDefaultAsync(ct)
+                       ?? await _db.GraphSnapshots.Where(s => s.ProjectId == projectId && s.IsCurrent).FirstOrDefaultAsync(ct);
         if (snapshot is null) return Ok(new GraphResponse(null, Array.Empty<GraphNodeResponse>(), Array.Empty<GraphEdgeResponse>()));
 
         var componentTypes = await _db.ComponentTypes.ToDictionaryAsync(c => c.Id, c => c.Code, ct);

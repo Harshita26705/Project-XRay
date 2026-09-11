@@ -34,7 +34,12 @@ public class AnalysisService
         var change = await _db.Changes.FirstOrDefaultAsync(c => c.ChangeId == request.ChangeId, ct)
                      ?? throw new InvalidOperationException("Change not found.");
 
-        var snapshot = await _db.GraphSnapshots.Where(s => s.ProjectId == change.ProjectId && s.IsCurrent).FirstOrDefaultAsync(ct);
+        var snapshotQuery = _db.GraphSnapshots.Where(s => s.ProjectId == change.ProjectId && s.IsCurrent);
+        snapshotQuery = request.BranchName is null
+            ? snapshotQuery.Where(s => s.Branch!.IsDefault || s.BranchId == null)
+            : snapshotQuery.Where(s => s.Branch!.Name == request.BranchName);
+        var snapshot = await snapshotQuery.FirstOrDefaultAsync(ct)
+                       ?? await _db.GraphSnapshots.Where(s => s.ProjectId == change.ProjectId && s.IsCurrent).FirstOrDefaultAsync(ct);
 
         var queuedStatusId = await _db.AnalysisStatuses.Where(s => s.Code == "RUNNING").Select(s => s.Id).FirstAsync(ct);
 
@@ -45,6 +50,7 @@ public class AnalysisService
             ProjectId = change.ProjectId,
             ChangeId = change.ChangeId,
             GraphSnapshotId = snapshot?.GraphSnapshotId,
+            BranchId = snapshot?.BranchId,
             AnalysisStatusId = queuedStatusId,
             MaxDepth = MaxDepth,
             ConfidenceThreshold = ConfidenceThreshold,
@@ -368,6 +374,7 @@ public class AnalysisService
         var graphNodeById = graphNodes.ToDictionary(n => n.GraphNodeId);
 
         var change = analysis.ChangeId is null ? null : await _db.Changes.FirstOrDefaultAsync(c => c.ChangeId == analysis.ChangeId, ct);
+        var branchName = analysis.BranchId is null ? null : await _db.Branches.Where(b => b.BranchId == analysis.BranchId).Select(b => b.Name).FirstOrDefaultAsync(ct);
 
         var nodeDtos = nodeResults.Select(r =>
         {
@@ -381,6 +388,7 @@ public class AnalysisService
             analysis.AnalysisId, analysis.ChangeId ?? Guid.Empty, change?.Title ?? "(manual analysis)",
             statuses.GetValueOrDefault(analysis.AnalysisStatusId, "QUEUED"),
             analysis.OverallRiskStateId is null ? null : riskStates.GetValueOrDefault(analysis.OverallRiskStateId.Value),
+            branchName,
             nodeDtos.Count(n => n.RiskState == "CRITICAL"),
             nodeDtos.Count(n => n.RiskState == "RISKY"),
             nodeDtos.Count(n => n.RiskState == "SAFE"),

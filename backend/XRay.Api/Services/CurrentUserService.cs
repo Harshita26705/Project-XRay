@@ -31,14 +31,22 @@ public class CurrentUserService : ICurrentUserService
                           ?? "dev-local-user";
         var email = principal.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value
                     ?? principal.FindFirst("preferred_username")?.Value
-                    ?? "dev@localhostnew1";
+                    ?? "dev@localhost";
         var name = principal.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value ?? email;
 
         var user = await _db.UserAccounts.FirstOrDefaultAsync(u => u.ExternalIdentityId == externalId, ct);
         if (user is not null)
         {
-            user.LastLoginAtUtc = DateTime.UtcNow;
-            await _db.SaveChangesAsync(ct);
+            // Best-effort only: concurrent requests racing on the same RowVersion must not fail the request.
+            try
+            {
+                user.LastLoginAtUtc = DateTime.UtcNow;
+                await _db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                _db.Entry(user).State = EntityState.Unchanged;
+            }
             return user;
         }
 
@@ -53,8 +61,20 @@ public class CurrentUserService : ICurrentUserService
             LastLoginAtUtc = DateTime.UtcNow,
         };
         _db.UserAccounts.Add(user);
-        await _db.SaveChangesAsync(ct);
-        return user;
+
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+            return user;
+        }
+        catch (DbUpdateException)
+        {
+            // Idempotency under concurrent first-login races: another request already inserted the
+            // same ExternalIdentityId (unique index) between our SELECT and INSERT. Detach the failed
+            // insert and return the row that won the race instead of surfacing a 500 to the client.
+            _db.Entry(user).State = EntityState.Detached;
+            return await _db.UserAccounts.FirstAsync(u => u.ExternalIdentityId == externalId, ct);
+        }
     }
 
     public async Task<Organization> GetOrProvisionOrganizationAsync(UserAccount user, CancellationToken ct = default)
@@ -69,7 +89,7 @@ public class CurrentUserService : ICurrentUserService
         {
             OrganizationId = Guid.NewGuid(),
             Name = "Project X-Ray Enterprise",
-            Slug = $"neworg-{user.UserId:N}"[..20],
+            Slug = $"org-{user.UserId:N}"[..20],
             CreatedAtUtc = DateTime.UtcNow,
             UpdatedAtUtc = DateTime.UtcNow,
         };
@@ -85,7 +105,20 @@ public class CurrentUserService : ICurrentUserService
             UpdatedAtUtc = DateTime.UtcNow,
         });
 
-        await _db.SaveChangesAsync(ct);
-        return org;
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+            return org;
+        }
+        catch (DbUpdateException)
+        {
+            // Same idempotency guard as GetOrProvisionUserAsync: another concurrent request already
+            // created this user's membership/organization (unique index on OrganizationId+UserId).
+            _db.ChangeTracker.Clear();
+            var existing = await _db.OrganizationMemberships
+                .Include(m => m.Organization)
+                .FirstAsync(m => m.UserId == user.UserId, ct);
+            return existing.Organization!;
+        }
     }
 }

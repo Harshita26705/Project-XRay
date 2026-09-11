@@ -69,6 +69,7 @@ public class ReportService
         await _db.SaveChangesAsync(ct);
 
         return new ReportResponse(report.ReportId, analysisId, report.Title, report.FormatCode, report.CreatedAtUtc,
+            analysis.OverallRiskStateId is null ? null : riskStates.GetValueOrDefault(analysis.OverallRiskStateId.Value),
             sections.Select(s => new ReportSectionResponse(s.SectionTypeCode, s.Title, s.Content, s.SortOrder)).ToList());
     }
 
@@ -79,11 +80,15 @@ public class ReportService
             .OrderByDescending(r => r.CreatedAtUtc)
             .ToListAsync(ct);
 
+        var riskStateCodes = await _db.RiskStates.ToDictionaryAsync(r => r.Id, r => r.Code, ct);
+
         var result = new List<ReportResponse>();
         foreach (var r in reports)
         {
             var sections = await _db.ReportSections.Where(s => s.ReportId == r.ReportId).OrderBy(s => s.SortOrder).ToListAsync(ct);
+            var analysis = await _db.Analyses.Where(a => a.AnalysisId == r.AnalysisId).Select(a => a.OverallRiskStateId).FirstOrDefaultAsync(ct);
             result.Add(new ReportResponse(r.ReportId, r.AnalysisId, r.Title, r.FormatCode, r.CreatedAtUtc,
+                analysis is null ? null : riskStateCodes.GetValueOrDefault(analysis.Value),
                 sections.Select(s => new ReportSectionResponse(s.SectionTypeCode, s.Title, s.Content, s.SortOrder)).ToList()));
         }
         return result;
@@ -94,7 +99,10 @@ public class ReportService
         var report = await _db.Reports.FirstOrDefaultAsync(r => r.ReportId == reportId, ct);
         if (report is null) return null;
         var sections = await _db.ReportSections.Where(s => s.ReportId == reportId).OrderBy(s => s.SortOrder).ToListAsync(ct);
+        var overallRiskStateId = await _db.Analyses.Where(a => a.AnalysisId == report.AnalysisId).Select(a => a.OverallRiskStateId).FirstOrDefaultAsync(ct);
+        var riskStateCode = overallRiskStateId is null ? null : await _db.RiskStates.Where(r => r.Id == overallRiskStateId).Select(r => r.Code).FirstOrDefaultAsync(ct);
         return new ReportResponse(report.ReportId, report.AnalysisId, report.Title, report.FormatCode, report.CreatedAtUtc,
+            riskStateCode,
             sections.Select(s => new ReportSectionResponse(s.SectionTypeCode, s.Title, s.Content, s.SortOrder)).ToList());
     }
 

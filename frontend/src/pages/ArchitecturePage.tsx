@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import ReactFlow, { Background, Controls, type Edge, type Node } from 'reactflow';
 import 'reactflow/dist/style.css';
+import clsx from 'clsx';
 import { api } from '../api/endpoints';
 import type { GraphResponse } from '../api/types';
 
@@ -27,20 +28,64 @@ const TYPE_COLORS: Record<string, string> = {
   EXTERNAL: '#64748b'
 };
 
-const NODE_FILTERS = ['Frontend', 'API', 'Controllers', 'Services', 'Repositories', 'Database', 'External'];
-const EDGE_FILTERS = ['Calls', 'Depends on', 'Imports', 'Reads', 'Writes'];
+// Node filter pills map to one or more ComponentType codes (see XRay.Parsers.ComponentTypeCodes).
+const NODE_FILTERS: Record<string, string[]> = {
+  Frontend: ['FRONTEND', 'FRONTEND_MODULE', 'FRONTEND_COMPONENT'],
+  API: ['API'],
+  Controllers: ['CONTROLLER'],
+  Services: ['SERVICE', 'INTERFACE'],
+  Repositories: ['REPOSITORY'],
+  Database: ['DATABASE', 'DATABASE_TABLE', 'DATABASE_COLUMN', 'STORED_PROCEDURE'],
+  External: ['EXTERNAL', 'UNKNOWN']
+};
+
+// Edge filter pills map to GraphEdgeType codes; edge types not listed here (EXPOSES, INHERITS,
+// REFERENCES, USES, BINDS) are structural backbone and always shown regardless of edge filter state.
+const EDGE_FILTERS: Record<string, string> = {
+  Calls: 'CALLS',
+  'Depends on': 'DEPENDS_ON',
+  Imports: 'IMPORTS',
+  Reads: 'READS',
+  Writes: 'WRITES'
+};
 
 export default function ArchitecturePage() {
   const { projectId } = useParams();
   const [graph, setGraph] = useState<GraphResponse | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [activeNodeFilters, setActiveNodeFilters] = useState(() => new Set(Object.keys(NODE_FILTERS)));
+  const [activeEdgeFilters, setActiveEdgeFilters] = useState(() => new Set(Object.keys(EDGE_FILTERS)));
 
   useEffect(() => {
     if (!projectId) return;
     void api.getGraph(projectId).then(setGraph);
   }, [projectId]);
 
-  const { nodes, edges } = useMemo(() => buildLayout(graph), [graph]);
+  const toggleNodeFilter = (label: string) => {
+    setActiveNodeFilters((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  };
+
+  const toggleEdgeFilter = (label: string) => {
+    setActiveEdgeFilters((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  };
+
+  const filteredGraph = useMemo(
+    () => applyFilters(graph, activeNodeFilters, activeEdgeFilters, search),
+    [graph, activeNodeFilters, activeEdgeFilters, search]
+  );
+
+  const { nodes, edges } = useMemo(() => buildLayout(filteredGraph), [filteredGraph]);
   const selectedNode = graph?.nodes.find((n) => n.nodeId === selectedNodeId);
 
   return (
@@ -57,14 +102,20 @@ export default function ArchitecturePage() {
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-4 rounded-lg border border-border bg-card px-4 py-2 text-xs">
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card px-4 py-2 text-xs">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search nodes..."
+          className="w-48 rounded border border-border bg-cardMuted px-2 py-1 text-xs placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-primary"
+        />
         <span className="text-text-muted">NODES:</span>
-        {NODE_FILTERS.map((f) => (
-          <span key={f} className="rounded-full border border-border px-2 py-0.5 text-text-secondary">{f}</span>
+        {Object.keys(NODE_FILTERS).map((label) => (
+          <FilterPill key={label} label={label} active={activeNodeFilters.has(label)} onClick={() => toggleNodeFilter(label)} />
         ))}
         <span className="ml-4 text-text-muted">EDGES:</span>
-        {EDGE_FILTERS.map((f) => (
-          <span key={f} className="rounded-full border border-border px-2 py-0.5 text-text-secondary">{f}</span>
+        {Object.keys(EDGE_FILTERS).map((label) => (
+          <FilterPill key={label} label={label} active={activeEdgeFilters.has(label)} onClick={() => toggleEdgeFilter(label)} />
         ))}
       </div>
 
@@ -73,6 +124,10 @@ export default function ArchitecturePage() {
           {!graph || graph.nodes.length === 0 ? (
             <div className="flex h-full items-center justify-center text-sm text-text-muted">
               No graph yet — ingest this project from the Projects page.
+            </div>
+          ) : nodes.length === 0 ? (
+            <div className="flex h-full items-center justify-center text-sm text-text-muted">
+              No nodes match the current filters/search.
             </div>
           ) : (
             <ReactFlow
@@ -100,6 +155,20 @@ export default function ArchitecturePage() {
   );
 }
 
+function FilterPill({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={clsx(
+        'rounded-full border px-2 py-0.5 transition-colors',
+        active ? 'border-primary/50 bg-primary/15 text-primary' : 'border-border text-text-muted hover:text-text-secondary'
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
 function Legend({ color, label }: { color: string; label: string }) {
   return (
     <span className="flex items-center gap-1.5">
@@ -107,6 +176,34 @@ function Legend({ color, label }: { color: string; label: string }) {
       {label}
     </span>
   );
+}
+
+function applyFilters(
+  graph: GraphResponse | null,
+  activeNodeFilters: Set<string>,
+  activeEdgeFilters: Set<string>,
+  search: string
+): GraphResponse | null {
+  if (!graph) return null;
+
+  const allowedNodeTypes = new Set(Object.entries(NODE_FILTERS).filter(([label]) => activeNodeFilters.has(label)).flatMap(([, codes]) => codes));
+  const allowedEdgeTypes = new Set(Object.entries(EDGE_FILTERS).filter(([label]) => activeEdgeFilters.has(label)).map(([, code]) => code));
+  const alwaysShownEdgeTypes = new Set(['EXPOSES', 'INHERITS', 'REFERENCES', 'USES', 'BINDS']);
+  const query = search.trim().toLowerCase();
+
+  const nodes = graph.nodes.filter((n) => {
+    if (!allowedNodeTypes.has(n.componentType)) return false;
+    if (query && !n.displayName.toLowerCase().includes(query) && !n.filePath?.toLowerCase().includes(query)) return false;
+    return true;
+  });
+  const nodeIds = new Set(nodes.map((n) => n.nodeId));
+
+  const edges = graph.edges.filter((e) => {
+    if (!nodeIds.has(e.sourceNodeId) || !nodeIds.has(e.targetNodeId)) return false;
+    return alwaysShownEdgeTypes.has(e.edgeType) || allowedEdgeTypes.has(e.edgeType);
+  });
+
+  return { snapshotId: graph.snapshotId, nodes, edges };
 }
 
 function buildLayout(graph: GraphResponse | null): { nodes: Node[]; edges: Edge[] } {
