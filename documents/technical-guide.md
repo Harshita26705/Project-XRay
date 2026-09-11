@@ -1,152 +1,115 @@
 # Technical Guide
 
-This is the technical explanation of Project X-Ray in simple language.
+This is the technical explanation of Project X-Ray's architecture.
 
 ## 1. Goal of the project
-Project X-Ray is a change-impact analysis tool.
 
-When a developer makes a change, the project tries to answer:
+Project X-Ray answers, before a change ships:
 
 - Which parts of the system may be affected?
 - Which dependencies are connected to the changed component?
 - Which parts are high risk?
-- How do we explain the impact clearly?
-
-This is useful for code changes, pull requests, service updates, and risk review.
+- Is there security evidence tied to the affected path?
+- How do we explain the impact clearly, without inventing facts?
 
 ## 2. Main idea: graph first, AI second
-The most important design choice is this:
 
-The dependency graph is the source of truth.
+**The dependency graph is the source of truth.** It tells us which files, classes, services, APIs, and database tables are connected. The AI layer does not decide the graph or the risk state — it only explains an already-computed result in natural language, and it is only ever fed facts (Evidence rows, AnalysisNodeResult rows) that the deterministic engine already produced.
 
-The graph tells us which files, classes, services, APIs, databases, and modules are connected.
+## 3. Solution architecture
 
-The AI layer does not decide the graph. It only explains the result in natural language.
+### Backend — ASP.NET Core (.NET 9), EF Core Code-First
 
-This design is important because it keeps the system more reliable and easier to trust.
+```
+backend/
+  XRay.Domain/           Plain C# entity classes for every schema.md table
+  XRay.Infrastructure/    AppDbContext, ModelConfiguration (fluent API), migrations, DbSeeder
+  XRay.Application/       Thin — most DTOs live next to controllers for delivery speed (see below)
+  XRay.Api/
+    Controllers/          One controller per resource (Projects, Changes, Analyses, Security, Reports, Integrations, Ai, Notifications, Settings, Me)
+    Services/              ProjectService, IngestionService, ChangeService, SecurityScanService,
+                            AnalysisService (the deterministic engine), ReportService, IntegrationService,
+                            AiExplanationService, NotificationService, SettingsService, CurrentUserService
+    Contracts/             Request/response DTOs
+    Auth/                  DevBypassAuthHandler (Development-only fake auth)
+    Program.cs             DI wiring, EF Core, auth (real MSAL vs. dev bypass), CORS, Swagger
+  XRay.Parsers/           CSharpParser (Roslyn), TypeScriptParser (regex), SqlParser (regex)
+  XRay.Tests/             xunit tests
+```
 
-## 3. High-level architecture
-Project X-Ray is built with a layered design.
+**Why services live directly in `XRay.Api` instead of a separate Application/Infrastructure interface split:** schema.md calls for 14 service boundaries across every domain; given the scope, the project favors concrete service classes with direct `AppDbContext` injection over an extra interface-abstraction layer. This is a deliberate, documented tradeoff for delivery speed — see `repo` memory notes if you're extending this codebase.
 
-### Frontend
-The frontend is a React + TypeScript app.
+### Database — SQL Server, EF Core Code-First
 
-It shows:
+Every table from [`Figma/schema.md`](../Figma/schema.md) is modeled as a C# entity (~50 entities across 12 domains: Identity, Projects, Ingestion, Graph, Change Management, Analysis, Security, AI, Reporting, Integrations, Notifications, Operations). Migrations are generated with `dotnet ef migrations add`, and `ModelConfiguration.cs` in `XRay.Infrastructure` configures keys, unique indexes, and lookup-table foreign keys via Fluent API.
 
-- the dependency graph
-- the changed nodes
-- risk status colors
-- component details
-- evidence and impact explanations
+All foreign keys use `DeleteBehavior.Restrict` — the schema is dense enough with cross-references that SQL Server's cascade-delete paths would collide; deletes are handled explicitly in application code instead.
 
-It allows the user to ingest the project and run the analysis from the browser.
+### Deterministic analysis engine
 
-### Backend
-The backend is built with Python and FastAPI.
+`AnalysisService.RunDeterministicEngineAsync`:
 
-It handles:
+1. Loads the project's current `GraphSnapshot` (nodes + edges).
+2. Maps the `Change`'s changed file paths to `GraphNode`s (direct impact).
+3. Runs a breadth-first search **backwards** along edges (who depends on what changed) up to `MaxDepth` (default 6), tracking distance and minimum edge confidence per path, plus an unbounded pass to detect "reachable but beyond depth" nodes.
+4. Classifies every node with the **R1–R12 rule table** (see root README) — `ConfidenceThreshold` defaults to 0.70, matching schema.md section 24 exactly.
+5. Writes `AnalysisNodeResult`, `Evidence`, and (if in scope) runs `SecurityScanService` and attaches `SecurityFinding`s, which can upgrade a node's risk to CRITICAL via rule R4.
+6. Computes the overall risk state (worst-case across nodes) and marks the analysis complete.
 
-- project ingestion
-- parsing source files
-- graph creation
-- change detection
-- risk classification
-- security checks
-- AI explanation generation
-- report generation
+This currently runs **synchronously in the request** rather than via the `Job` table + a background worker (the table exists in the schema for this purpose; nothing dispatches to it yet — a documented follow-up).
 
-### Graph engine
-The graph engine creates a network of connected components.
+### Parsers
 
-Example:
+- **C# (Roslyn syntax trees, no semantic model):** classes/interfaces classified by naming convention (`*Controller`, `*Service`, `*Repository`, `I*` interfaces, `DbContext` subclasses) → `GraphNode`s; constructor-injected parameters → `DEPENDS_ON` edges; `[HttpGet]`/`[HttpPost]`/etc. + `[Route]` → `API` nodes with `EXPOSES` edges; `DbSet<T>` properties → `DATABASE_TABLE` nodes; member access on context-like fields → best-effort `READS`/`WRITES` edges.
+- **TypeScript/TSX (regex/heuristic):** `.tsx` files → `FRONTEND_COMPONENT`, `.ts` → `FRONTEND_MODULE`; relative `import` statements → `IMPORTS` edges; `fetch`/`axios` calls → `CALLS` edges to matching `API` nodes (best-effort path normalization).
+- **SQL (regex, `Microsoft.SqlServer.TransactSql.ScriptDom` referenced for a future AST-accurate upgrade):** `CREATE TABLE` → `DATABASE_TABLE` nodes; `FOREIGN KEY ... REFERENCES` → `REFERENCES` edges; `CREATE PROCEDURE` → `STORED_PROCEDURE` nodes.
 
-- Frontend page calls an API
-- API belongs to a controller or service
-- Service calls database layer
-- database stores data
+### Security scanning
 
-These connections are used to determine blast radius.
+`SecurityScanService` runs regex-based SAST rules against changed files' source text (re-read from the local repository path): hardcoded secrets, SQL injection via string concatenation, weak crypto (`MD5`/`DES`/`SHA1`), and insecure deserialization (`BinaryFormatter`/`JavaScriptSerializer`). Findings are normalized into `SecurityFinding` rows tied to the responsible `GraphNode`.
 
-### Security layer
-The security layer checks for obvious issues such as secrets, vulnerable dependencies, and risky patterns.
+### AI explanation layer
 
-This is added evidence. It does not decide the risk on its own.
+`AiExplanationService` builds an explanation using only `AnalysisNodeResult`/`Evidence` facts. If `AzureOpenAI:Endpoint`/`AzureOpenAI:ApiKey` are configured, it calls a real chat-completions endpoint with a prompt built strictly from those facts; otherwise it falls back to a deterministic template and marks the generation `Degraded = true`. Every `AIGeneration` is linked to the `Evidence` it referenced via `AIOutputReference`, so a generation can never claim a fact the deterministic engine didn't produce.
 
-### AI adapter
-The AI layer is isolated behind an adapter.
+### Authentication
 
-That means the project can switch between:
+Real Microsoft Entra ID (Azure AD) via `Microsoft.Identity.Web` (backend JWT bearer validation) and MSAL.js/`@azure/msal-react` (frontend). A **development-only bypass** (`DevBypassAuthHandler` on the backend, a local-only auth provider on the frontend) lets you run the whole app without an App Registration — see the setup guide for how to switch to real sign-in.
 
-- a mock backend for local demo work
-- Microsoft Foundry
-- an OpenAI-compatible endpoint
+### Frontend — React 18 + TypeScript + Vite + Tailwind + React Flow
 
-The AI sits on top of the graph and evidence instead of replacing the graph.
+```
+frontend/src/
+  api/          Typed fetch client + per-domain endpoint functions
+  auth/          MSAL config + AuthProvider (real MSAL or dev bypass)
+  state/         ProjectContext (current selected project)
+  components/    AppShell (Sidebar/Topbar), RiskBadge, StatusBadge, Card/StatCard, Button, ProgressBar, EmptyState/ErrorState
+  pages/         All 20 screens from the Figma spec, each fetching real data from the API
+```
 
-## 4. How the tool works
-The project follows a simple flow.
+Design tokens (dark enterprise palette, risk colors) live in `tailwind.config.js`. Routing is React Router; `ProjectContext` tracks which project is "current" (persisted in `localStorage`) since most screens are scoped to a single project.
 
-### Step 1: ingest the project
-The app scans the repository files and extracts useful information.
+## 4. Data flow, end to end
 
-### Step 2: parse source files
-It reads code and extracts relationships such as:
+```
+Connect Project (local path)
+  -> IngestionService walks the repo, invokes CSharpParser/TypeScriptParser/SqlParser
+  -> materializes a GraphSnapshot (GraphNode + GraphEdge), unresolved edge targets become EXTERNAL nodes
+  -> Architecture screen renders it via React Flow
 
-- imports
-- service calls
-- API routes
-- class dependencies
-- database references
+Analyze a Change (Work Item / Pull Request / Manual)
+  -> ChangeService creates a Change + ChangeFile rows
+  -> AnalysisService.CreateAndRunAsync maps changed files to GraphNodes, runs BFS blast radius,
+     applies R1-R12, runs SecurityScanService, writes AnalysisNodeResult + Evidence + SecurityFinding
+  -> Analysis Results / Trace Evidence / Security Center screens render the real results
+  -> AiExplanationService produces the "Expert Explanation" from those same facts
+  -> ReportService assembles a Report + ReportSections for the Reports / Report Detail screens
+```
 
-### Step 3: build the dependency graph
-The extracted data is turned into a connected graph of nodes and edges.
+## 5. Known limitations
 
-### Step 4: detect change impact
-The user provides a changed file or change description, and the system finds what is connected to it.
+See the root [`README.md`](../README.md) "Known limitations / next steps" section — it's kept in one place to avoid drift between documents.
 
-### Step 5: classify impact
-Each affected component is assigned a status:
-
-- RED: direct or high-impact area
-- YELLOW: mild or medium risk
-- GREEN: likely not impacted
-- UNKNOWN: not enough evidence
-
-### Step 6: add evidence
-Each result is supported by evidence such as a file path, line reference, edge reference, and confidence level.
-
-### Step 7: explain the result
-The AI layer reads the graph evidence and produces simple human-readable explanations.
-
-## 5. Why the graph is important
-Without the graph, the app would only know that a file changed.
-
-With the graph, the app can answer:
-
-- what else depends on this file?
-- what else is connected to this login flow?
-- which service is likely reached from the changed UI?
-
-That is what makes the project valuable.
-
-## 6. Status logic
-The engine does not simply say "changed file = red".
-
-It checks distance, confidence, path, and known behavior.
-
-Some examples:
-
-- a directly changed component is often RED
-- a nearby connected component may be YELLOW
-- a fully unreachable component can be GREEN only when proven
-- uncertain results stay UNKNOWN
-
-This makes the results more honest and safer than a simple AI guess.
-
-## 7. Security and honest results
-This project tries to avoid false certainty.
-
-If the project information is incomplete, or a scanner is unavailable, the result should degrade to UNKNOWN instead of pretending everything is safe.
 
 This is an important engineering decision.
 

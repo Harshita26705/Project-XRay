@@ -1,151 +1,93 @@
-import { useMemo, useState } from 'react';
-import TabNav, { type TabId } from './components/TabNav';
-import DependencyGraphTab from './tabs/DependencyGraphTab';
-import LandingPage from './tabs/LandingPage';
-import PRReportTab from './tabs/PRReportTab';
-import SecurityTab from './tabs/SecurityTab';
-import SetupTab from './tabs/SetupTab';
-import XRayTab from './tabs/XRayTab';
-import type { AnalysisResult, GraphPayload } from './types';
+import { useEffect } from 'react';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { AuthProvider, useAuth } from './auth/AuthProvider';
+import { registerTokenGetter } from './api/client';
+import { ProjectProvider } from './state/ProjectContext';
+import { AppShell } from './components/AppShell';
 
-const EMPTY_GRAPH: GraphPayload = { nodes: [], edges: [] };
+import LoginPage from './pages/LoginPage';
+import OverviewPage from './pages/OverviewPage';
+import ProjectsPage from './pages/ProjectsPage';
+import ArchitecturePage from './pages/ArchitecturePage';
+import AnalyzeChangePage from './pages/AnalyzeChangePage';
+import AnalysisProgressPage from './pages/AnalysisProgressPage';
+import AnalysisResultsPage from './pages/AnalysisResultsPage';
+import TraceEvidencePage from './pages/TraceEvidencePage';
+import SecurityCenterPage from './pages/SecurityCenterPage';
+import ChangesPage from './pages/ChangesPage';
+import PullRequestDetailPage from './pages/PullRequestDetailPage';
+import WorkItemDetailPage from './pages/WorkItemDetailPage';
+import ReportsPage from './pages/ReportsPage';
+import ReportDetailPage from './pages/ReportDetailPage';
+import IntegrationsPage from './pages/IntegrationsPage';
+import AiConfigurationPage from './pages/AiConfigurationPage';
+import SettingsPage from './pages/SettingsPage';
+import NotificationSettingsPage from './pages/NotificationSettingsPage';
+import EmptyStatesPage from './pages/EmptyStatesPage';
+import ErrorStatesPage from './pages/ErrorStatesPage';
+import AnalysesListPage from './pages/AnalysesListPage';
+
+function RequireAuth({ children }: { children: JSX.Element }) {
+  const { isAuthenticated } = useAuth();
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  return children;
+}
+
+function TokenBridge() {
+  const { getAccessToken } = useAuth();
+  useEffect(() => {
+    registerTokenGetter(getAccessToken);
+  }, [getAccessToken]);
+  return null;
+}
+
+function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        element={
+          <RequireAuth>
+            <ProjectProvider>
+              <AppShell />
+            </ProjectProvider>
+          </RequireAuth>
+        }
+      >
+        <Route path="/overview" element={<OverviewPage />} />
+        <Route path="/projects" element={<ProjectsPage />} />
+        <Route path="/projects/:projectId/architecture" element={<ArchitecturePage />} />
+        <Route path="/analyses" element={<AnalysesListPage />} />
+        <Route path="/analyses/new" element={<AnalyzeChangePage />} />
+        <Route path="/analyses/:analysisId/progress" element={<AnalysisProgressPage />} />
+        <Route path="/analyses/:analysisId" element={<AnalysisResultsPage />} />
+        <Route path="/analyses/:analysisId/evidence" element={<TraceEvidencePage />} />
+        <Route path="/security" element={<SecurityCenterPage />} />
+        <Route path="/changes" element={<ChangesPage />} />
+        <Route path="/changes/pr/:changeId" element={<PullRequestDetailPage />} />
+        <Route path="/changes/work-item/:changeId" element={<WorkItemDetailPage />} />
+        <Route path="/reports" element={<ReportsPage />} />
+        <Route path="/reports/:reportId" element={<ReportDetailPage />} />
+        <Route path="/integrations" element={<IntegrationsPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/settings/ai" element={<AiConfigurationPage />} />
+        <Route path="/settings/notifications" element={<NotificationSettingsPage />} />
+        <Route path="/dev/empty-states" element={<EmptyStatesPage />} />
+        <Route path="/dev/error-states" element={<ErrorStatesPage />} />
+        <Route index element={<Navigate to="/overview" replace />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/overview" replace />} />
+    </Routes>
+  );
+}
 
 export default function App() {
-  const [showLanding, setShowLanding] = useState(true);
-  const [activeTab, setActiveTab] = useState<TabId>('setup');
-  const [projectId, setProjectId] = useState('cgone-demo');
-  const [root, setRoot] = useState('../demo-app');
-  const [critical, setCritical] = useState('PaymentService');
-  const [graph, setGraph] = useState<GraphPayload>(EMPTY_GRAPH);
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [impactedOnly, setImpactedOnly] = useState(true);
-  const [runSecurity, setRunSecurity] = useState(true);
-
-  const ingested = graph.nodes.length > 0;
-  const securityCount = analysis?.security.findings.length ?? 0;
-
-  const tabs = useMemo(
-    () => [
-      { id: 'setup' as TabId, label: '1. Set Up', hint: 'Configure and ingest the project' },
-      {
-        id: 'graph' as TabId,
-        label: '2. Dependency Graph',
-        hint: 'Explore the full dependency graph',
-        disabled: !ingested
-      },
-      {
-        id: 'xray' as TabId,
-        label: '3. X-Ray',
-        hint: 'Link a requirement and analyze its impact',
-        disabled: !ingested
-      },
-      {
-        id: 'pr' as TabId,
-        label: '4. PR Report',
-        hint: 'Attach a pull request and analyze its impact',
-        disabled: !ingested
-      },
-      {
-        id: 'security' as TabId,
-        label: '5. Security',
-        hint: 'Review security findings from the latest analysis',
-        disabled: !ingested,
-        badge: securityCount
-      }
-    ],
-    [ingested, securityCount]
-  );
-
-  function handleIngested(next: GraphPayload) {
-    setGraph(next);
-    setAnalysis(null);
-    setSelectedId(null);
-    setActiveTab('graph');
-  }
-
-  function handleAnalysis(next: AnalysisResult) {
-    setAnalysis(next);
-    setSelectedId(null);
-  }
-
-  if (showLanding) {
-    return <LandingPage onGetStarted={() => setShowLanding(false)} />;
-  }
-
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-slate-950 text-slate-100">
-      <header className="shrink-0 border-b border-slate-800 bg-slate-900 px-4 py-3 sm:px-6">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <button
-            type="button"
-            onClick={() => setShowLanding(true)}
-            className="text-lg font-bold tracking-tight hover:text-amber-400"
-          >
-            PROJECT X-RAY
-          </button>
-          <span className="text-xs text-slate-400">
-            Change impact analysis — the dependency graph is authoritative
-          </span>
-          {ingested && (
-            <span className="ml-auto rounded-full border border-slate-700 px-2.5 py-0.5 text-[11px] text-slate-400">
-              Project: <span className="font-mono text-slate-200">{projectId}</span>
-            </span>
-          )}
-        </div>
-      </header>
-
-      <TabNav tabs={tabs} active={activeTab} onChange={setActiveTab} />
-
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        {activeTab === 'setup' && (
-          <SetupTab
-            projectId={projectId}
-            onProjectId={setProjectId}
-            root={root}
-            onRoot={setRoot}
-            critical={critical}
-            onCritical={setCritical}
-            onIngested={handleIngested}
-            ingested={ingested}
-          />
-        )}
-        {activeTab === 'graph' && (
-          <DependencyGraphTab
-            graph={graph}
-            analysis={analysis}
-            impactedOnly={impactedOnly}
-            onImpactedOnly={setImpactedOnly}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-          />
-        )}
-        {activeTab === 'xray' && (
-          <XRayTab
-            projectId={projectId}
-            ingested={ingested}
-            runSecurity={runSecurity}
-            onRunSecurity={setRunSecurity}
-            analysis={analysis}
-            onAnalysis={handleAnalysis}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-          />
-        )}
-        {activeTab === 'pr' && (
-          <PRReportTab
-            projectId={projectId}
-            ingested={ingested}
-            runSecurity={runSecurity}
-            onRunSecurity={setRunSecurity}
-            analysis={analysis}
-            onAnalysis={handleAnalysis}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-          />
-        )}
-        {activeTab === 'security' && <SecurityTab analysis={analysis} />}
-      </main>
-    </div>
+    <AuthProvider>
+      <TokenBridge />
+      <BrowserRouter>
+        <AppRoutes />
+      </BrowserRouter>
+    </AuthProvider>
   );
 }

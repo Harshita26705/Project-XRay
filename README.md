@@ -1,170 +1,102 @@
 # Project X-Ray
 
-Change-impact and blast-radius analysis for CGOne-style codebases (C#/.NET + React/TypeScript + SQL Server).
+Change-impact, dependency, and security blast-radius analysis for enterprise codebases (C#/.NET + React/TypeScript + SQL Server).
 
-> **CGOne code change → dependency graph → deterministic blast radius → security evidence → explanation → RED / YELLOW / GREEN / UNKNOWN**
+> **Code change → dependency graph → deterministic blast radius → security evidence → AI explanation → CRITICAL / RISKY / SAFE / UNKNOWN**
 
 ## The core principle
 
-**The dependency graph is authoritative.** Blast radius, distances and risk states are computed by deterministic graph traversal with zero AI involvement. The AI layer only writes prose explanations, and anything it invents is discarded before it reaches you.
+**The dependency graph is authoritative.** Blast radius, distances, and risk states are computed by deterministic graph traversal — zero AI involvement. The AI layer only writes prose explanations, and it is only ever fed facts the deterministic engine already produced (evidence, node results). It can never invent a node, edge, risk state, or finding.
 
-The deterministic core produces a complete, valid result with **no Azure resource, no AI endpoint, no database and no network access**. Security scanning, knowledge retrieval and AI explanation are strictly additive; when they are missing the result says `UNKNOWN`, never "safe".
+If evidence is incomplete, the result says `UNKNOWN` — never silently `SAFE`.
 
-## Current status
+## Architecture
 
-| Phase | Status |
+| Layer | Tech |
 | --- | --- |
-| 0. Scaffold + contracts | Done |
-| 1. CGOne-mirroring demo app (.NET + React + SQL) | Done |
-| 2. FastAPI backend | Done |
-| 3. Ingestion + secret masking | Done |
-| 4. C#/.NET parser | Done |
-| 5. React/TypeScript parser | Done |
-| 6. Cross-layer linker | Done |
-| 7. `GraphStore` abstraction (in-memory) | Done |
-| 8. Change sources (git diff, manual JSON) | Done |
-| 9. Deterministic blast radius | Done |
-| 10. Classifier + risk engine + evidence chain | Done |
-| 11. Security scanners with honest degradation | Done |
-| 12. React dashboard | Done |
-| 13. AI adapter (mock / Foundry / OpenAI-compatible) | Done |
-| 14. Markdown reports | Done |
-| 15–19. SQL Server metadata, Azure DevOps, AI Search, Teams | Not started |
-| 20–24. Power Automate, persistence, Roslyn, sandbox, deploy | Not started |
+| Backend | ASP.NET Core (.NET 9) Web API, EF Core **Code-First** against SQL Server |
+| Database | SQL Server (LocalDB for local dev) — full normalized schema, see [`Figma/schema.md`](Figma/schema.md) |
+| Deterministic engine | C# — Roslyn-based C# parser, regex-based TypeScript/SQL parsers, BFS blast radius, R1–R12 classifier |
+| Auth | Microsoft Entra ID (Azure AD) via MSAL — with a local dev-only bypass so you can run the app before an App Registration exists |
+| Frontend | React 18 + TypeScript + Vite + Tailwind + React Flow, routed with React Router |
+
+This is a full rewrite of the original Python/FastAPI + in-memory-store prototype. See [`documents/technical-guide.md`](documents/technical-guide.md) for the detailed architecture and [`documents/setup-guide.md`](documents/setup-guide.md) for what you need to install/configure.
 
 ## Quick start
 
-Requires Python 3.11+, Node 20+, .NET 9 SDK (optional, for the demo app), git.
+Requires: .NET 9 SDK, Node 20+, SQL Server LocalDB (ships with Visual Studio / SQL Server Express), git.
 
 ```powershell
-# Backend
+# 1. Backend — apply migrations (creates the XRay database on LocalDB) and run the API
 cd backend
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m pytest              # 35 tests
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
+dotnet ef database update --project XRay.Infrastructure --startup-project XRay.Api
+dotnet run --project XRay.Api
+# API on http://localhost:5006, Swagger at /swagger
 
-# Frontend (separate terminal)
+# 2. Frontend (separate terminal)
 cd frontend
 npm install
-npm run dev                                        # http://localhost:5173
+npm run dev
+# App on http://localhost:5173
 ```
 
-Then in the dashboard: **1. Ingest repository** → **2. Run X-Ray analysis**.
+The app runs with a **development authentication bypass** by default (no real Microsoft Entra ID App Registration required) — see [`documents/setup-guide.md`](documents/setup-guide.md) for how to switch to real Azure AD sign-in.
 
-### Offline, no server
-
-```powershell
-.\backend\.venv\Scripts\python.exe scripts\run_demo_analysis.py
-.\backend\.venv\Scripts\python.exe scripts\run_demo_analysis.py --markdown
-```
-
-### API smoke test
-
-```powershell
-powershell -File .\scripts\smoke-test.ps1
-```
+Once signed in: **Projects → Connect Project** (point it at a local repository path, e.g. `demo-app/`) → **Open Project** to ingest and view the dependency graph → **Analyses → Analyze a Change** to run the deterministic engine.
 
 ## Repository layout
 
 ```
-backend/app/
-  contracts/     Pydantic types shared by every layer
-  ingestion/     File walking, secret detection and masking
-  parsers/       C#, TypeScript and T-SQL parsers
-  graph/         GraphStore abstraction + in-memory implementation + builder
-  analysis/      Change mapping, blast radius, classifier, risk engine, orchestration
-  security/      Real scanners, normalised into findings
-  ai/            Reasoner protocol, mock backend, Foundry / OpenAI-compatible backends
-  sources/       Change sources (git diff, manual)
-  reporting/     Markdown report
-  api/           FastAPI routes
-demo-app/        CGOne-mirroring synthetic app (.NET + React + SQL Server DDL)
-frontend/        React + TypeScript + React Flow dashboard
-scripts/         Demo runner and smoke test
+backend/
+  XRay.Domain/          Entities for every schema.md table (Identity, Projects, Graph, Analysis, Security, AI, ...)
+  XRay.Infrastructure/   EF Core AppDbContext, fluent model configuration, migrations, seed data
+  XRay.Application/      (thin — DTOs mostly live next to controllers, see technical-guide.md)
+  XRay.Api/              Controllers, services (ingestion, analysis engine, security scan, AI explain, reports, ...), Program.cs, auth
+  XRay.Parsers/          C# (Roslyn), TypeScript (regex/heuristic), SQL (regex) structural parsers
+  XRay.Tests/            xunit tests
+
+frontend/
+  src/api/               Typed API client
+  src/auth/              MSAL + dev-bypass auth provider
+  src/components/        AppShell, Sidebar, Topbar, RiskBadge, Card, Button, ...
+  src/pages/             All 20 screens (Login, Overview, Projects, Architecture, Analyze Change, ...)
+  src/state/             ProjectContext (current project selection)
+
+demo-app/                Sample CGOne-style app (.NET API + React + SQL) used as the analysis target — not part of X-Ray itself
+Figma/                   Design source of truth: schema.md (DB schema) and prompt.md (frontend spec) + reference screenshots
+documents/               Setup, technical, and user guides
 ```
 
-## Classification rules
+## Classification rules (R1–R12)
 
-Evaluated in order; **first match wins**. `MAX_DEPTH` defaults to 6, `CONF_THRESHOLD` to 0.70.
+Evaluated in priority order in `XRay.Api/Services/AnalysisService.cs`. `MaxDepth` defaults to 6, `ConfidenceThreshold` to 0.70 — matching [`Figma/schema.md`](Figma/schema.md) section 24 exactly.
 
 | Rule | Condition | State |
 | --- | --- | --- |
 | R1 | Node failed to parse | UNKNOWN |
 | R2 | Modified and only partially parsed | UNKNOWN |
-| R3 | Node is modified by the change | RED |
-| R4 | HIGH/CRITICAL security finding attributed to the node | RED |
-| R5 | Distance ≤ 1 and min edge confidence ≥ threshold | RED |
-| R6 | Distance ≤ 1 and min edge confidence < threshold | YELLOW |
-| R7 | Critical component within `MAX_DEPTH` | RED |
-| R8 | Distance 2..`MAX_DEPTH` | YELLOW |
+| R3 | Node is modified by the change | CRITICAL |
+| R4 | HIGH/CRITICAL security finding attributed to the node | CRITICAL |
+| R5 | Distance ≤ 1 and min edge confidence ≥ threshold | CRITICAL |
+| R6 | Distance ≤ 1 and min edge confidence < threshold | RISKY |
+| R8 | Distance 2..MaxDepth | RISKY |
 | R9 | Path traverses a runtime-resolved edge | UNKNOWN |
 | R10 | Partially parsed | UNKNOWN |
-| R11 | Reachable but beyond `MAX_DEPTH` | YELLOW (`beyond_depth_horizon`) |
-| R12 | Fully parsed and provably unreachable | GREEN |
+| R11 | Reachable but beyond MaxDepth | RISKY |
+| R12 | Fully parsed and provably unreachable | SAFE |
 
-**GREEN is reachable only through R12.** It means "no impact detected with the available evidence", not "safe". Everything undecidable becomes UNKNOWN.
-
-Distance-0 non-modified nodes are interfaces bound to a modified implementation, which is why R5 uses `≤ 1` rather than `== 1`. `BINDS` edges cost zero hops, because an interface and its registered implementation are one logical component — without this, DI indirection would double every distance.
-
-### Analysis-level UNKNOWN
-
-The whole result is UNKNOWN, not GREEN, when the graph is empty, no changed file maps to a component, the change set is empty, or the parse failure ratio exceeds the configured threshold.
+**SAFE is reachable only through R12** — "no impact detected with the available evidence", not "secure". Everything undecidable becomes UNKNOWN.
 
 ## Evidence chain
 
-Every non-GREEN node carries the exact path that produced its state, with the parser rule, source file, line and confidence for each hop:
+Every non-SAFE node carries the exact graph path that produced its state (source file, line, parser rule, confidence per hop) as `Evidence` rows — viewable on the **Trace Evidence** screen. The AI explanation layer only ever references evidence that already exists; it never authors new evidence, nodes, or edges.
 
-```
-CLASS:PaymentsController --DEPENDS_ON--> INTERFACE:IPaymentService
-    csharp.ctor_injection @ Controllers/PaymentsController.cs:13   conf 0.95
-API:POST /api/payments   --EXPOSES-->    CLASS:PaymentsController
-    csharp.api_exposed_by_controller @ Controllers/PaymentsController.cs:18   conf 0.98
-FRONTEND_MODULE:src/api/paymentApi.ts --CALLS--> API:POST /api/payments
-    typescript.http_call @ src/api/paymentApi.ts:15   conf 0.90
-FRONTEND_COMPONENT:src/pages/CheckoutPage.tsx --IMPORTS--> FRONTEND_MODULE:src/api/paymentApi.ts
-    typescript.import @ src/pages/CheckoutPage.tsx:2   conf 0.98
-```
+## Known limitations / next steps
 
-Paths come from graph traversal. The AI never authors them.
+- The deterministic analysis engine runs synchronously in-request rather than via the `Job` table + background worker (the table exists in the schema; nothing dispatches to it yet).
+- No SignalR push for the Analysis Progress screen yet — it's a polling-shaped contract for now.
+- The TypeScript parser is regex/heuristic (no ts-morph/real AST); the SQL parser is regex-based even though `Microsoft.SqlServer.TransactSql.ScriptDom` is referenced for a future upgrade.
+- Azure DevOps and Microsoft Foundry integrations get a real HTTP connectivity probe on "Test Connection"; Azure AI Search, Microsoft Teams, and Power Automate are modeled with connection state but "Test Connection" is currently simulated.
+- C# analysis is class-level (Roslyn syntax tree only, no semantic model), so identically named classes in different namespaces can collapse into one node.
+- Dependency detection is structural, not semantic; reflection and fully dynamic dispatch are not resolved.
 
-## What the parsers extract
-
-**C# / .NET** — controllers and route attributes, HTTP verb attributes, DI registrations (`AddScoped<IFoo, Foo>`), constructor injection, field declarations, invocations on injected members, object creation, base types, EF Core `DbSet` declarations and access (read vs write), raw SQL string table references.
-
-**React / TypeScript** — components vs modules, relative imports with extension/index resolution, `fetch` and axios-style client calls with route normalisation.
-
-**T-SQL** — `CREATE TABLE` and `FOREIGN KEY ... REFERENCES`.
-
-Routes are normalised to a shared signature (`/api/Payments/{id:int}` and `` `/api/payments/${id}` `` both become `GET /api/payments/{}`), which is what links a React component to the controller serving it.
-
-## AI backends
-
-Configure with `XRAY_AI_BACKEND`:
-
-- `mock` (default) — deterministic, offline, always labelled as such
-- `foundry` — `azure-ai-projects` + `DefaultAzureCredential`
-- `openai_compatible` — an Azure OpenAI-compatible endpoint supplied by IT
-
-Guardrails applied to every backend: output is parsed with Pydantic, node ids not present in the graph are dropped, and the model cannot change any state, distance or path. Any failure falls back to the mock backend and marks the explanation subsystem `DEGRADED`.
-
-## Security
-
-Scanners run independently: built-in secret detection (always available), `npm audit`, and `dotnet list package --vulnerable`. Unavailable scanners are listed explicitly and reduce confidence. Secrets are masked during ingestion, before anything is stored, logged or sent to a model.
-
-## Known limitations
-
-- C# types are keyed by simple name, so two same-named classes in different namespaces collapse into one node.
-- Analysis is class-level, not method-level.
-- Interface implementations discovered without a DI registration get confidence 0.65 and are marked runtime-resolved, so they yield YELLOW/UNKNOWN rather than RED.
-- Dependency detection is structural, not semantic; reflection and dynamic dispatch are not resolved.
-- The graph is in-memory and rebuilt on each ingest.
-- Risk points are declared heuristics, not calibrated probabilities.
-- GREEN means "no impact detected with available evidence". Human review is still required.
-
-## To verify against live Microsoft tooling
-
-- The exact `azure-ai-projects` call surface for your Foundry deployment.
-- Whether your Power Automate licence permits the HTTP action.
-- Whether Azure DevOps service hooks in your org can reach a dev tunnel URL.
-- `azure-search-documents` vector field configuration and embedding dimensions.

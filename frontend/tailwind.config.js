@@ -4,39 +4,54 @@ export default {
   theme: {
     extend: {
       colors: {
-        risk: {
-          red: '#dc2626',
-          yellow: '#d97706',
-          green: '#16a34a',
-          unknown: '#6b7280'
+        // Enterprise dark SaaS palette matching the Figma reference screens.
+        page: '#0a0d16',
+        sidebar: '#0d1120',
+        topbar: '#0d1120',
+        card: '#12162a',
+        cardMuted: '#161b32',
+        border: {
+          DEFAULT: '#22273d',
+          light: '#2b3151'
         },
-        xray: {
-          bg: '#191f36',
-          panel: '#262b40',
-          main: '#00f0ff',
-          accent: '#42a5f5'
+        primary: {
+          DEFAULT: '#3b82f6',
+          hover: '#2563eb',
+          muted: '#1d3a68'
+        },
+        risk: {
+          critical: '#ef4444',
+          riskyBg: '#78350f',
+          risky: '#f59e0b',
+          safe: '#22c55e',
+          unknown: '#64748b'
+        },
+        text: {
+          primary: '#f1f5f9',
+          secondary: '#94a3b8',
+          muted: '#64748b'
         }
       },
+      fontFamily: {
+        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'monospace']
+      },
       keyframes: {
-        float: {
-          '0%, 100%': { transform: 'translateY(0rem)' },
-          '50%': { transform: 'translateY(-2rem)' }
-        },
-        floatCard: {
-          '0%, 100%': { transform: 'translateY(0rem) translateX(0rem)' },
-          '50%': { transform: 'translateY(-1.5rem) translateX(1rem)' }
-        },
         fadeIn: {
-          from: { opacity: 0, transform: 'translateY(1rem)' },
+          from: { opacity: 0, transform: 'translateY(0.5rem)' },
           to: { opacity: 1, transform: 'translateY(0)' }
+        },
+        pulseGlow: {
+          '0%, 100%': { opacity: 1 },
+          '50%': { opacity: 0.55 }
         }
       },
       animation: {
-        float: 'float 6s ease-in-out infinite',
-        floatCard: 'floatCard 3s ease-in-out infinite',
-        fadeIn: 'fadeIn 0.3s ease'
+        fadeIn: 'fadeIn 0.25s ease',
+        pulseGlow: 'pulseGlow 1.6s ease-in-out infinite'
       }
     }
   },
   plugins: []
 };
+

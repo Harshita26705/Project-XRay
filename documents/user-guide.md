@@ -1,152 +1,64 @@
 # User Guide
 
-This guide explains how to use Project X-Ray in simple language.
+This guide explains how to use Project X-Ray.
 
 ## 1. What the app is for
-Project X-Ray helps you understand which parts of a system may be affected by a code change.
 
-It is useful when you want to know:
+Project X-Ray helps you understand which parts of a system may be affected by a code change — how far it can spread, which services/modules are at risk, and whether the risk is direct, indirect, or genuinely uncertain.
 
-- how far a change can spread
-- which services or modules are at risk
-- what parts are connected to a changed area
-- whether the issue is likely direct, indirect, or uncertain
+## 2. Starting the app
 
-## 2. How to start the project
-Use these steps:
-
-### Start the backend
 ```powershell
+# Backend
 cd backend
-.\.venv\Scripts\Activate.ps1
-python -m uvicorn app.main:app --reload --port 8000
-```
+dotnet run --project XRay.Api
 
-### Start the frontend
-Open another terminal:
-
-```powershell
+# Frontend (separate terminal)
 cd frontend
-npm install
 npm run dev
 ```
 
-Then open the local dashboard URL in the browser.
+Open `http://localhost:5173`. Click **Continue with Microsoft** on the login screen — by default this uses a local development sign-in with no Azure AD setup required (see the setup guide to switch to real Microsoft Entra ID sign-in).
 
-## 3. Main actions in the app
-After the app loads, the main user flow is usually:
+## 3. Main workflow
 
-1. Ingest the project or repo
-2. Load the dependency map
-3. Select a change or changed file
-4. Run the analysis
-5. Review the results
-6. Open evidence and impacted nodes
-7. Read the AI explanation if enabled
+1. **Projects → Connect Project** — give it a name and a local repository path (e.g. the bundled `demo-app/` folder), then **Create & Ingest**. This walks the repository, parses C#/TypeScript/SQL files, and builds the dependency graph.
+2. **Open Project → Architecture** — explore the dependency graph (frontend → API → controller → service → repository → database).
+3. **Analyses → Analyze a Change** — choose **Work Item**, **Pull Request**, or **Manual Change**, list the changed file paths (relative to the repository root), pick your analysis scope, and **Run X-Ray Analysis**.
+4. **Analysis Results** — see risk counts (Critical/Risky/Safe/Unknown), the blast-radius graph, X-Ray Findings, and the Expert Explanation.
+5. **View Traceable Evidence** — every non-Safe conclusion is backed by an Evidence card: which file, which relationship, what confidence.
+6. **Security Center** — all security findings across the project, with severity, component, and remediation guidance.
+7. **Reports** — generate and browse historical analysis reports.
 
-## 4. Understanding the colors
-Each component is marked as a status:
+## 4. Understanding the risk states
 
-- GREEN: no clear impact found
-- YELLOW: possible or indirect impact
-- RED: likely impacted area
-- UNKNOWN: unclear or missing evidence
+- **CRITICAL** — strong evidence of direct or high-impact change (the component was modified, or a HIGH/CRITICAL security finding is attached to it, or it's one hop away with high-confidence evidence).
+- **RISKY** — potential downstream/transitive impact.
+- **SAFE** — no impact detected with the evidence currently available. **This is not the same as "secure."**
+- **UNKNOWN** — the engine could not establish a trustworthy conclusion (parse failure, dynamic/runtime-resolved dependency, or insufficient metadata). This is a valid, honest result — it is never silently turned into SAFE.
 
-Use these colors as a first indicator, but always read the evidence.
+## 5. Reading the dependency graph
 
-## 5. Reading the graph
-The graph is the main visual view.
+Nodes represent frontend components/modules, API endpoints, controllers, services, interfaces, repositories, and database tables. Edges show relationships (`CALLS`, `DEPENDS_ON`, `IMPORTS`, `EXPOSES`, `READS`, `WRITES`, `INHERITS`, `REFERENCES`). If the changed component is connected to many surrounding nodes, the risk expands outward through those edges.
 
-Nodes represent things like:
+## 6. Using the evidence
 
-- services
-- APIs
-- controllers
-- repositories
-- modules
-- database objects
+Every important conclusion is backed by an `Evidence` record showing the file path, line reference, relationship type, and confidence — visible on the **Trace Evidence** screen. This is what lets you verify a conclusion instead of just trusting a color.
 
-Edges show how they connect.
+## 7. Using the AI explanation
 
-If the changed part is connected to many surrounding nodes, the risk expands outward.
+The **Expert Explanation** panel on the Analysis Results screen is a natural-language summary built strictly from the same evidence you can see on the Trace Evidence screen. If no real Foundry/Azure OpenAI endpoint is configured, it's a deterministic template and is labeled as running in fallback/degraded mode — the underlying risk states and evidence are unaffected either way.
 
-## 6. How to interpret an impact result
-A result usually includes:
+## 8. Common troubleshooting
 
-- changed component
-- impacted nodes
-- why they are connected
-- file and code references
-- confidence or risk level
-- explanation text
+**The app doesn't start** — check the .NET 9 SDK and Node 20+ are installed, LocalDB is available (`sqllocaldb info` should list `MSSQLLocalDB`), and the backend is running before you load the frontend.
 
-If a node is RED, it is likely in the blast radius.
+**Ingest fails / no graph appears** — verify the local repository path you gave when connecting the project actually exists and is readable by the process running the backend.
 
-If a node is YELLOW, it might be affected but is not clearly direct.
+**Analysis creation fails** — make sure you've ingested the project (so there's a current `GraphSnapshot`) before analyzing a change.
 
-If a node is GREEN, it is not currently shown as impacted based on available evidence.
+**AI explanation says "fallback mode"** — this is expected unless you've configured `AzureOpenAI:Endpoint`/`AzureOpenAI:ApiKey` — see the setup guide.
 
-If a node is UNKNOWN, the project lacks enough reliable information.
-
-## 7. Using the evidence
-The project should always show evidence behind the decision.
-
-Good evidence includes:
-
-- file name
-- class or module name
-- dependency edge
-- line references
-- relationship type
-
-This matters because it helps the developer trust the result rather than just accepting a color.
-
-## 8. Using the AI explanation
-If AI is enabled, the app generates a natural-language explanation of the impact.
-
-This explanation should be read as a summary, not as the final decision source.
-
-The real logic still comes from the graph and risk engine.
-
-## 9. Recommended workflow for a developer
-Use this workflow:
-
-1. Open the project in the dashboard
-2. Ingest repository data
-3. Choose a target change or file
-4. Run analysis
-5. Review impacted components
-6. Open the evidence chain
-7. Use the summary to decide if the change needs extra review
-
-## 10. What happens in demo mode
-In demo mode, the system can run without external cloud services.
-
-This is useful for:
-
-- testing the logic
-- validating the graph
-- verifying the dashboard
-- showing the idea to a team in a hackathon or demo
-
-## 11. Common troubleshooting
-### The app does not start
-Check:
-
-- Python version
-- Node version
-- installed dependencies
-- whether the backend is running before the frontend
-
-### No results appear
-Check:
-
-- the repo was ingested correctly
-- the project folder is valid
-- the analysis step was actually run
-
-### AI explanation is missing
-Check whether the AI backend is configured and whether mock mode is enabled.
 
 ### Results look uncertain
 That may be expected. If the project is incomplete or the graph lacks data, UNKNOWN is safer than a wrong answer.
