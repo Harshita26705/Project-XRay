@@ -2,6 +2,8 @@ namespace XRay.Api.Contracts;
 
 public record CreateProjectRequest(string Name, string? Description, string? ExternalProjectUrl, string? LocalRepositoryPath);
 
+public record UpdateProjectRequest(string Name, string? Description);
+
 public record ProjectResponse(
     Guid ProjectId,
     string Name,
@@ -18,6 +20,22 @@ public record ProjectResponse(
 public record GraphNodeResponse(Guid NodeId, string ExternalKey, string ComponentType, string DisplayName, string? FilePath, bool IsParsed);
 
 public record GraphEdgeResponse(Guid EdgeId, Guid SourceNodeId, Guid TargetNodeId, string EdgeType, decimal Confidence, bool IsRuntimeResolved);
+
+public record NodeConnectionDetail(Guid NeighborNodeId, string NeighborName, string EdgeType, decimal Confidence, string Direction);
+
+public record ProjectNodeDetailResponse(
+    Guid NodeId,
+    string ExternalKey,
+    string ComponentType,
+    string DisplayName,
+    string? FilePath,
+    bool IsParsed,
+    IReadOnlyList<string> Contains,
+    IReadOnlyList<NodeConnectionDetail> Incoming,
+    IReadOnlyList<NodeConnectionDetail> Outgoing,
+    string? WhyThisMatters);
+
+public record ProjectSecurityScanResponse(Guid SecurityScanId, Guid ProjectId, int FindingCount, string Status, DateTime StartedAtUtc, DateTime? CompletedAtUtc);
 
 public record GraphResponse(Guid? SnapshotId, IReadOnlyList<GraphNodeResponse> Nodes, IReadOnlyList<GraphEdgeResponse> Edges);
 

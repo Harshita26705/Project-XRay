@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using XRay.Api.Contracts;
 using XRay.Api.Services;
@@ -24,6 +25,8 @@ public class AnalysesController : ControllerBase
     }
 
     [HttpPost("analyses")]
+    [EnableRateLimiting("expensive")]
+    [RequestSizeLimit(64 * 1024)]
     public async Task<ActionResult<AnalysisResponse>> Create(CreateAnalysisRequest request, CancellationToken ct)
     {
         var user = await _currentUser.GetOrProvisionUserAsync(User, ct);
@@ -53,13 +56,10 @@ public class AnalysesController : ControllerBase
     [HttpGet("analyses/{analysisId:guid}/progress")]
     public async Task<ActionResult<AnalysisProgressResponse>> Progress(Guid analysisId, CancellationToken ct)
     {
-        // The engine currently runs synchronously to completion, so progress is always reported as
-        // 100% complete by the time this is queryable. Kept as a real endpoint so the Analysis
-        // Progress screen has a stable contract to poll once background job dispatch lands.
         var analysis = await _db.Analyses.FirstOrDefaultAsync(a => a.AnalysisId == analysisId, ct);
         if (analysis is null) return NotFound();
         var statusCode = await _db.AnalysisStatuses.Where(s => s.Id == analysis.AnalysisStatusId).Select(s => s.Code).FirstAsync(ct);
-        return Ok(new AnalysisProgressResponse("GENERATING_REPORT", statusCode, statusCode == "COMPLETED" ? 100m : 50m, null, null));
+        return Ok(new AnalysisProgressResponse(statusCode));
     }
 
     [HttpGet("analyses/{analysisId:guid}/evidence")]

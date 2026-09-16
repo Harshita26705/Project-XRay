@@ -1,32 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
-import ReactFlow, { Background, Controls, type Edge, type Node } from 'reactflow';
+import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useParams, useSearchParams } from 'react-router-dom';
+import ReactFlow, { Background, Controls, MiniMap, Panel, type Edge, type Node } from 'reactflow';
 import 'reactflow/dist/style.css';
 import clsx from 'clsx';
+import dagre from 'dagre';
 import { api } from '../api/endpoints';
-import type { GraphResponse } from '../api/types';
-
-const LAYER_ORDER = [
-  'FRONTEND_COMPONENT', 'FRONTEND_MODULE', 'FRONTEND',
-  'API',
-  'CONTROLLER',
-  'SERVICE', 'INTERFACE',
-  'REPOSITORY',
-  'DATABASE_TABLE', 'DATABASE', 'STORED_PROCEDURE',
-  'EXTERNAL', 'UNKNOWN'
-];
-
-const TYPE_COLORS: Record<string, string> = {
-  FRONTEND_COMPONENT: '#3b82f6',
-  FRONTEND_MODULE: '#60a5fa',
-  API: '#f59e0b',
-  CONTROLLER: '#ef4444',
-  SERVICE: '#22c55e',
-  INTERFACE: '#a78bfa',
-  REPOSITORY: '#f97316',
-  DATABASE_TABLE: '#38bdf8',
-  EXTERNAL: '#64748b'
-};
+import type { GraphResponse, ProjectNodeDetailResponse } from '../api/types';
+import { useProjects } from '../state/ProjectContext';
+import { GraphLegend, GRAPH_TYPE_COLORS } from '../components/GraphLegend';
 
 // Node filter pills map to one or more ComponentType codes (see XRay.Parsers.ComponentTypeCodes).
 const NODE_FILTERS: Record<string, string[]> = {
@@ -51,16 +33,29 @@ const EDGE_FILTERS: Record<string, string> = {
 
 export default function ArchitecturePage() {
   const { projectId } = useParams();
-  const [graph, setGraph] = useState<GraphResponse | null>(null);
+  const [searchParams] = useSearchParams();
+  const { currentBranch } = useProjects();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(() => searchParams.get('q') ?? '');
   const [activeNodeFilters, setActiveNodeFilters] = useState(() => new Set(Object.keys(NODE_FILTERS)));
   const [activeEdgeFilters, setActiveEdgeFilters] = useState(() => new Set(Object.keys(EDGE_FILTERS)));
+  const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!projectId) return;
-    void api.getGraph(projectId).then(setGraph);
-  }, [projectId]);
+  const graphQuery = useQuery({
+    queryKey: ['graph', projectId, currentBranch?.name ?? null],
+    queryFn: () => api.getGraph(projectId!, currentBranch?.name),
+    enabled: Boolean(projectId)
+  });
+  const graph: GraphResponse | null = graphQuery.data ?? null;
+  const selectedNodeQuery = useQuery({
+    queryKey: ['graph-node-detail', projectId, selectedNodeId],
+    queryFn: () => api.getGraphNodeDetail(projectId!, selectedNodeId!),
+    enabled: Boolean(projectId) && Boolean(selectedNodeId),
+    staleTime: 30_000
+  });
+  const selectedNodeDetail: ProjectNodeDetailResponse | null = selectedNodeQuery.data ?? null;
+  const loading = graphQuery.isLoading;
+  const error = graphQuery.error instanceof Error ? graphQuery.error.message : null;
 
   const toggleNodeFilter = (label: string) => {
     setActiveNodeFilters((prev) => {
@@ -81,12 +76,13 @@ export default function ArchitecturePage() {
   };
 
   const filteredGraph = useMemo(
-    () => applyFilters(graph, activeNodeFilters, activeEdgeFilters, search),
-    [graph, activeNodeFilters, activeEdgeFilters, search]
+    () => applyFilters(graph, activeNodeFilters, activeEdgeFilters, search, focusNodeId),
+    [graph, activeNodeFilters, activeEdgeFilters, search, focusNodeId]
   );
 
   const { nodes, edges } = useMemo(() => buildLayout(filteredGraph), [filteredGraph]);
   const selectedNode = graph?.nodes.find((n) => n.nodeId === selectedNodeId);
+  const detailNodeLabel = selectedNodeDetail?.displayName ?? selectedNode?.displayName ?? 'Node';
 
   return (
     <div className="flex h-full flex-col gap-4">
@@ -94,11 +90,10 @@ export default function ArchitecturePage() {
         <div>
           <h1 className="text-xl font-bold">CGOne Architecture</h1>
           <p className="mt-1 text-sm text-text-secondary">Explore dependencies across frontend, backend and database schemas.</p>
+          {currentBranch && <p className="mt-1 text-xs text-primary">Branch: {currentBranch.name} · {currentBranch.headCommitSha?.slice(0, 8) ?? 'working tree'}</p>}
         </div>
         <div className="flex items-center gap-3 text-xs">
-          <Legend color="#ef4444" label="Critical" />
-          <Legend color="#f59e0b" label="Risky" />
-          <Legend color="#22c55e" label="Safe" />
+          {focusNodeId && <button type="button" onClick={() => setFocusNodeId(null)} className="text-primary hover:underline">Reset focus</button>}
         </div>
       </div>
 
@@ -121,7 +116,14 @@ export default function ArchitecturePage() {
 
       <div className="flex flex-1 gap-4">
         <div className="flex-1 overflow-hidden rounded-lg border border-border bg-card">
-          {!graph || graph.nodes.length === 0 ? (
+          {loading ? (
+            <div className="flex h-full items-center justify-center text-sm text-text-muted">Loading architecture...</div>
+          ) : error ? (
+            <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-text-muted">
+              <span className="font-medium text-text-primary">Architecture unavailable</span>
+              <span>{error}</span>
+            </div>
+          ) : !graph || graph.nodes.length === 0 ? (
             <div className="flex h-full items-center justify-center text-sm text-text-muted">
               No graph yet — ingest this project from the Projects page.
             </div>
@@ -134,20 +136,118 @@ export default function ArchitecturePage() {
               nodes={nodes}
               edges={edges}
               onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+              onNodeDoubleClick={(_, node) => setFocusNodeId(node.id)}
+              onPaneClick={() => setFocusNodeId(null)}
               fitView
+              fitViewOptions={{ padding: 0.2, minZoom: 0.35, maxZoom: 1.2 }}
+              nodesConnectable={false}
+              defaultEdgeOptions={{ type: 'smoothstep', animated: false }}
               proOptions={{ hideAttribution: true }}
             >
-              <Background color="#1e2337" gap={20} />
+              <Background color="#252b42" gap={24} size={1} />
               <Controls />
+              <MiniMap
+                nodeColor={(node) => String(node.data.color ?? '#64748b')}
+                maskColor="rgba(10, 14, 28, 0.72)"
+                className="!border !border-border !bg-card"
+              />
+              <Panel position="top-right" className="!m-3 rounded border border-border bg-card/95 px-3 py-2 text-[11px] text-text-secondary shadow-lg">
+                <span className="font-semibold text-text-primary">{nodes.length}</span> components
+                <span className="mx-1.5 text-text-muted">/</span>
+                <span className="font-semibold text-text-primary">{edges.length}</span> relationships
+              </Panel>
+              <GraphLegend mode="architecture" />
             </ReactFlow>
           )}
         </div>
 
-        {selectedNode && (
-          <div className="w-72 shrink-0 rounded-lg border border-border bg-card p-4 text-sm">
-            <h3 className="font-semibold">{selectedNode.displayName}</h3>
-            <p className="mt-1 text-xs uppercase tracking-wide text-text-muted">{selectedNode.componentType}</p>
-            {selectedNode.filePath && <p className="mt-3 break-all font-mono text-[11px] text-text-secondary">{selectedNode.filePath}</p>}
+        {(selectedNode || selectedNodeDetail) && (
+          <div className="w-80 shrink-0 rounded-lg border border-border bg-card p-4 text-sm">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="font-semibold">{detailNodeLabel}</h3>
+                <p className="mt-1 text-xs uppercase tracking-wide text-text-muted">{selectedNodeDetail?.componentType ?? selectedNode?.componentType ?? 'Unknown'}</p>
+              </div>
+              {selectedNodeDetail?.filePath && (
+                <span className="rounded bg-primary/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-primary">parsed</span>
+              )}
+            </div>
+
+            {(selectedNodeDetail?.filePath ?? selectedNode?.filePath) && (
+              <p className="mt-3 break-all font-mono text-[11px] text-text-secondary">
+                {(selectedNodeDetail?.filePath ?? selectedNode?.filePath) as string}
+              </p>
+            )}
+
+            {selectedNodeDetail?.contains && selectedNodeDetail.contains.length > 0 && (
+              <div className="mt-4">
+                <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">Contains</p>
+                <ul className="space-y-1.5">
+                  {selectedNodeDetail.contains.slice(0, 8).map((item) => (
+                    <li key={item} className="rounded border border-border bg-cardMuted px-2 py-1 text-[11px] text-text-secondary">
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {selectedNodeDetail && (
+              <>
+                <div className="mt-4 space-y-3">
+                  <div>
+                    <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-muted">Depended on by</p>
+                    {selectedNodeDetail.incoming.length === 0 ? (
+                      <p className="text-[11px] text-text-muted">No incoming dependencies.</p>
+                    ) : (
+                      <ul className="space-y-1.5">
+                        {selectedNodeDetail.incoming.slice(0, 6).map((edge) => (
+                          <li key={`${edge.neighborNodeId}-${edge.edgeType}-incoming`}>
+                            <button
+                              onClick={() => setSelectedNodeId(edge.neighborNodeId)}
+                              className="w-full rounded border border-border bg-cardMuted px-2 py-1 text-left text-[11px] text-text-secondary transition hover:border-primary/40 hover:text-text-primary"
+                            >
+                              <span className="font-medium text-text-primary">{edge.neighborName}</span>
+                              <span className="ml-2 text-text-muted">{edge.edgeType}</span>
+                              <span className="ml-2 text-primary">{edge.confidence.toFixed(2)}</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+
+                  <div>
+                    <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-muted">Depends on</p>
+                    {selectedNodeDetail.outgoing.length === 0 ? (
+                      <p className="text-[11px] text-text-muted">No outgoing dependencies.</p>
+                    ) : (
+                      <ul className="space-y-1.5">
+                        {selectedNodeDetail.outgoing.slice(0, 6).map((edge) => (
+                          <li key={`${edge.neighborNodeId}-${edge.edgeType}-outgoing`}>
+                            <button
+                              onClick={() => setSelectedNodeId(edge.neighborNodeId)}
+                              className="w-full rounded border border-border bg-cardMuted px-2 py-1 text-left text-[11px] text-text-secondary transition hover:border-primary/40 hover:text-text-primary"
+                            >
+                              <span className="font-medium text-text-primary">{edge.neighborName}</span>
+                              <span className="ml-2 text-text-muted">{edge.edgeType}</span>
+                              <span className="ml-2 text-primary">{edge.confidence.toFixed(2)}</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+
+                {selectedNodeDetail.whyThisMatters && (
+                  <div className="mt-4 rounded border border-primary/20 bg-primary/5 p-2 text-[11px] text-primary">
+                    <p className="font-semibold uppercase tracking-wide">Why this matters</p>
+                    <p className="mt-1 leading-relaxed">{selectedNodeDetail.whyThisMatters}</p>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </div>
@@ -169,20 +269,12 @@ function FilterPill({ label, active, onClick }: { label: string; active: boolean
   );
 }
 
-function Legend({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="flex items-center gap-1.5">
-      <span className="h-2 w-2 rounded-full" style={{ backgroundColor: color }} />
-      {label}
-    </span>
-  );
-}
-
 function applyFilters(
   graph: GraphResponse | null,
   activeNodeFilters: Set<string>,
   activeEdgeFilters: Set<string>,
-  search: string
+  search: string,
+  focusNodeId: string | null
 ): GraphResponse | null {
   if (!graph) return null;
 
@@ -196,43 +288,54 @@ function applyFilters(
     if (query && !n.displayName.toLowerCase().includes(query) && !n.filePath?.toLowerCase().includes(query)) return false;
     return true;
   });
-  const nodeIds = new Set(nodes.map((n) => n.nodeId));
+  const focusNeighbors = focusNodeId
+    ? new Set(graph.edges.filter((edge) => edge.sourceNodeId === focusNodeId || edge.targetNodeId === focusNodeId).flatMap((edge) => [edge.sourceNodeId, edge.targetNodeId]))
+    : null;
+  const focusedNodes = focusNeighbors ? nodes.filter((node) => focusNeighbors.has(node.nodeId)) : nodes;
+  const nodeIds = new Set(focusedNodes.map((n) => n.nodeId));
 
   const edges = graph.edges.filter((e) => {
     if (!nodeIds.has(e.sourceNodeId) || !nodeIds.has(e.targetNodeId)) return false;
     return alwaysShownEdgeTypes.has(e.edgeType) || allowedEdgeTypes.has(e.edgeType);
   });
 
-  return { snapshotId: graph.snapshotId, nodes, edges };
+  return { snapshotId: graph.snapshotId, nodes: focusedNodes, edges };
 }
 
 function buildLayout(graph: GraphResponse | null): { nodes: Node[]; edges: Edge[] } {
   if (!graph) return { nodes: [], edges: [] };
 
-  const layerIndex = (type: string) => {
-    const idx = LAYER_ORDER.indexOf(type);
-    return idx === -1 ? LAYER_ORDER.length : idx;
+  const layerForType = (type: string) => {
+    if (type.startsWith('FRONTEND')) return 'Frontend';
+    if (type === 'API' || type === 'CONTROLLER') return 'API';
+    if (type === 'SERVICE' || type === 'INTERFACE') return 'Services';
+    if (type === 'REPOSITORY') return 'Data access';
+    if (type.startsWith('DATABASE') || type === 'STORED_PROCEDURE') return 'Database';
+    if (type === 'EXTERNAL') return 'External';
+    return 'Other';
   };
 
-  const byLayer = new Map<number, typeof graph.nodes>();
+  const layerOrder = ['Frontend', 'API', 'Services', 'Data access', 'Database', 'External', 'Other'];
+  const byLayer = new Map<string, typeof graph.nodes>();
   for (const node of graph.nodes) {
-    const layer = layerIndex(node.componentType);
+    const layer = layerForType(node.componentType);
     if (!byLayer.has(layer)) byLayer.set(layer, []);
     byLayer.get(layer)!.push(node);
   }
 
   const nodes: Node[] = [];
-  const sortedLayers = [...byLayer.keys()].sort((a, b) => a - b);
-  sortedLayers.forEach((layer, layerIdx) => {
+  const sortedLayers = layerOrder.filter((layer) => byLayer.has(layer));
+  sortedLayers.forEach((layer) => {
     const items = byLayer.get(layer)!;
-    items.forEach((n, i) => {
+    [...items].sort((a, b) => a.displayName.localeCompare(b.displayName)).forEach((n) => {
+      const color = GRAPH_TYPE_COLORS[n.componentType] ?? '#64748b';
       nodes.push({
         id: n.nodeId,
-        position: { x: i * 220, y: layerIdx * 130 },
-        data: { label: n.displayName },
+        position: { x: 0, y: 0 },
+        data: { label: n.displayName, color },
         style: {
           background: '#161b32',
-          border: `1px solid ${TYPE_COLORS[n.componentType] ?? '#334155'}`,
+          border: `1px solid ${color}`,
           borderRadius: 8,
           color: '#e2e8f0',
           fontSize: 11,
@@ -243,14 +346,24 @@ function buildLayout(graph: GraphResponse | null): { nodes: Node[]; edges: Edge[
     });
   });
 
+  const layoutGraph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+  layoutGraph.setGraph({ rankdir: 'LR', ranksep: 120, nodesep: 36, marginx: 24, marginy: 24 });
+  for (const node of nodes) layoutGraph.setNode(node.id, { width: 180, height: 48 });
+  for (const edge of graph.edges) {
+    if (layoutGraph.hasNode(edge.sourceNodeId) && layoutGraph.hasNode(edge.targetNodeId)) layoutGraph.setEdge(edge.sourceNodeId, edge.targetNodeId);
+  }
+  dagre.layout(layoutGraph);
+  for (const node of nodes) {
+    const position = layoutGraph.node(node.id);
+    if (position) node.position = { x: position.x - 90, y: position.y - 24 };
+  }
+
   const edges: Edge[] = graph.edges.map((e) => ({
     id: e.edgeId,
     source: e.sourceNodeId,
     target: e.targetNodeId,
-    label: e.edgeType,
     animated: e.isRuntimeResolved,
-    style: { stroke: '#384157' },
-    labelStyle: { fill: '#64748b', fontSize: 9 }
+    style: { stroke: e.isRuntimeResolved ? '#f59e0b' : '#475569', strokeWidth: e.isRuntimeResolved ? 1.5 : 1 }
   }));
 
   return { nodes, edges };

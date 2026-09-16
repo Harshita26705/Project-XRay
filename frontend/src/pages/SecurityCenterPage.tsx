@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/endpoints';
 import { useProjects } from '../state/ProjectContext';
-import type { SecurityFindingResponse } from '../api/types';
+import type { ProjectSecurityScanResponse, SecurityFindingResponse } from '../api/types';
 import { Card } from '../components/Card';
 import { StatusBadge } from '../components/StatusBadge';
 import { FilterSelect } from '../components/FilterSelect';
 import { EmptyState } from '../components/States';
+import { Button } from '../components/Button';
 
 const SEVERITY_COLOR: Record<string, string> = {
   CRITICAL: 'text-risk-critical',
@@ -21,14 +22,44 @@ export default function SecurityCenterPage() {
   const [selected, setSelected] = useState<SecurityFindingResponse | null>(null);
   const [severityFilter, setSeverityFilter] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState('ALL');
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanHistory, setScanHistory] = useState<ProjectSecurityScanResponse[]>([]);
+
+  const exportFindings = () => {
+    const header = 'Title,Severity,Component,File,Line,Status,Remediation';
+    const rows = findings.map((finding) => [finding.title, finding.severity, finding.component ?? '', finding.filePath ?? '', finding.lineStart ?? '', finding.status, finding.remediation ?? '']
+      .map((value) => `"${String(value).replace(/"/g, '""')}"`).join(','));
+    const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `security-findings-${new Date().toISOString().slice(0, 10)}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const loadFindings = async () => {
+    if (!currentProject) return;
+    const data = await api.getSecurityFindings(currentProject.projectId);
+    setFindings(data);
+    setSelected(data[0] ?? null);
+  };
 
   useEffect(() => {
-    if (!currentProject) return;
-    void api.getSecurityFindings(currentProject.projectId).then((data) => {
-      setFindings(data);
-      setSelected(data[0] ?? null);
-    });
+    void loadFindings();
   }, [currentProject]);
+
+  const handleRunScan = async () => {
+    if (!currentProject) return;
+    setIsScanning(true);
+    try {
+      const response = await api.runProjectSecurityScan(currentProject.projectId);
+      setScanHistory((previous) => [response, ...previous].slice(0, 5));
+      await loadFindings();
+    } finally {
+      setIsScanning(false);
+    }
+  };
 
   const counts = {
     critical: findings.filter((f) => f.severity === 'CRITICAL').length,
@@ -37,18 +68,43 @@ export default function SecurityCenterPage() {
     unknown: findings.filter((f) => f.severity === 'INFO').length
   };
 
-  const filtered = findings.filter((f) => {
+  const filtered = useMemo(() => findings.filter((f) => {
     if (severityFilter !== 'ALL' && f.severity !== severityFilter) return false;
     if (statusFilter !== 'ALL' && f.status !== statusFilter) return false;
     return true;
-  });
+  }), [findings, severityFilter, statusFilter]);
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-bold">Security Center</h1>
-        <p className="mt-1 text-sm text-text-secondary">Security findings connected to your software architecture.</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-bold">Security Center</h1>
+          <p className="mt-1 text-sm text-text-secondary">Security findings connected to your software architecture.</p>
+        </div>
+        <div className="flex gap-2">
+          <Button onClick={exportFindings} disabled={findings.length === 0}>Export Findings</Button>
+          <Button variant="primary" onClick={handleRunScan} disabled={isScanning || !currentProject}>
+            {isScanning ? 'Scanning…' : 'Run Security Scan'}
+          </Button>
+        </div>
       </div>
+
+      {scanHistory.length > 0 && (
+        <Card className="p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Recent scans</span>
+            <span className="text-[10px] text-text-muted">Last {scanHistory.length}</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {scanHistory.map((scan) => (
+              <div key={scan.securityScanId} className="rounded border border-border bg-cardMuted px-2 py-1.5 text-[11px] text-text-secondary">
+                <div className="font-medium text-text-primary">{new Date(scan.startedAtUtc).toLocaleString()}</div>
+                <div>{scan.findingCount} findings · {scan.status}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <div className="grid grid-cols-4 gap-4">
         <Card className="p-4 text-center"><p className="text-2xl font-bold text-risk-critical">{counts.critical}</p><p className="text-xs text-text-muted">Critical</p></Card>

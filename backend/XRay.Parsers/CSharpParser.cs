@@ -38,7 +38,7 @@ public class CSharpParser
             var typeName = typeDecl.Identifier.Text;
             var isInterface = typeDecl is InterfaceDeclarationSyntax;
             var componentType = ClassifyType(typeName, isInterface, typeDecl);
-            var key = $"CLASS:{typeName}";
+            var key = BuildClassKey(typeDecl, typeName);
 
             var lineSpan = typeDecl.GetLocation().GetLineSpan();
             nodes.Add(new ParsedNode(
@@ -52,7 +52,7 @@ public class CSharpParser
                 {
                     var baseName = baseType.Type.ToString().Split('<')[0].Trim();
                     edges.Add(new ParsedEdge(
-                        key, $"CLASS:{baseName}", GraphEdgeTypeCodes.Inherits, 0.9m,
+                        key, ResolveTypeKey(typeDecl, baseName), GraphEdgeTypeCodes.Inherits, 0.9m,
                         "csharp.base_list", relativeFilePath, lineSpan.StartLinePosition.Line + 1));
                 }
             }
@@ -72,7 +72,7 @@ public class CSharpParser
 
                     var depLine = param.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                     edges.Add(new ParsedEdge(
-                        key, $"CLASS:{rawType}", GraphEdgeTypeCodes.DependsOn, 0.85m,
+                        key, ResolveTypeKey(typeDecl, rawType), GraphEdgeTypeCodes.DependsOn, 0.85m,
                         "csharp.constructor_injection", relativeFilePath, depLine));
                 }
             }
@@ -142,6 +142,40 @@ public class CSharpParser
         }
 
         return new ParseResult(nodes, edges, errors);
+    }
+
+    private static string BuildClassKey(TypeDeclarationSyntax typeDecl, string typeName)
+    {
+        var ns = GetNamespaceName(typeDecl);
+        return string.IsNullOrEmpty(ns) ? $"CLASS:{typeName}" : $"CLASS:{ns}.{typeName}";
+    }
+
+    private static string ResolveTypeKey(TypeDeclarationSyntax typeDecl, string rawType)
+    {
+        var typeName = rawType.Split('<')[0].Trim();
+        if (string.IsNullOrWhiteSpace(typeName)) return "CLASS:UNKNOWN";
+        if (typeName.Contains('.', StringComparison.Ordinal)) return $"CLASS:{typeName}";
+
+        var ns = GetNamespaceName(typeDecl);
+        return string.IsNullOrEmpty(ns) ? $"CLASS:{typeName}" : $"CLASS:{ns}.{typeName}";
+    }
+
+    private static string? GetNamespaceName(TypeDeclarationSyntax typeDecl)
+    {
+        for (var parent = typeDecl.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is NamespaceDeclarationSyntax namespaceDecl)
+            {
+                return namespaceDecl.Name.ToString();
+            }
+
+            if (parent is FileScopedNamespaceDeclarationSyntax fileScopedNamespace)
+            {
+                return fileScopedNamespace.Name.ToString();
+            }
+        }
+
+        return null;
     }
 
     private static bool IsDbContext(TypeDeclarationSyntax typeDecl) =>

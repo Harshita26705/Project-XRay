@@ -30,13 +30,6 @@ export default function LoginPage() {
         >
           <span>&#8862;</span> Continue with Microsoft
         </button>
-        <button
-          onClick={login}
-          className="mt-2 flex w-full items-center justify-center gap-2 rounded-md border border-border bg-cardMuted py-2.5 text-sm font-medium text-text-primary hover:border-border-light"
-        >
-          <span>&#8855;</span> Continue with SSO
-        </button>
-
         <p className="mt-6 text-[11px] text-text-muted">
           {isDevBypass
             ? 'Dev mode: no Azure AD App Registration configured yet — signing in uses a local bypass user.'

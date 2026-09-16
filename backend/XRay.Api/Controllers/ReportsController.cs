@@ -44,4 +44,41 @@ public class ReportsController : ControllerBase
     [HttpGet("projects/{projectId:guid}/reports")]
     public async Task<ActionResult<IReadOnlyList<ReportResponse>>> List(Guid projectId, CancellationToken ct) =>
         Ok(await _reports.ListAsync(projectId, ct));
+
+    [HttpGet("reports/{reportId:guid}/export")]
+    public async Task<ActionResult> Export(Guid reportId, [FromQuery] string format = "pdf", CancellationToken ct = default)
+    {
+        var report = await _reports.GetAsync(reportId, ct);
+        if (report is null) return NotFound();
+
+        var payload = string.Join("\n\n", report.Sections.Select(s => $"<h2>{System.Net.WebUtility.HtmlEncode(s.Title ?? s.SectionType)}</h2><p>{System.Net.WebUtility.HtmlEncode(s.Content ?? string.Empty)}</p>"));
+        var html = $"<html><body><h1>{System.Net.WebUtility.HtmlEncode(report.Title)}</h1>{payload}</body></html>";
+
+        if (string.Equals(format, "xlsx", StringComparison.OrdinalIgnoreCase))
+        {
+            var csv = new System.Text.StringBuilder();
+            csv.AppendLine("Section,Title,Content");
+            foreach (var section in report.Sections)
+            {
+                var sectionValue = EscapeCsv(section.SectionType);
+                var titleValue = EscapeCsv(section.Title ?? string.Empty);
+                var contentValue = EscapeCsv(section.Content ?? string.Empty);
+                csv.AppendLine($"{sectionValue},{titleValue},{contentValue}");
+            }
+
+            return File(System.Text.Encoding.UTF8.GetBytes(csv.ToString()), "text/csv; charset=utf-8", $"{report.Title}.csv");
+        }
+
+        return File(System.Text.Encoding.UTF8.GetBytes(html), "text/html; charset=utf-8", $"{report.Title}.html");
+    }
+
+    private static string EscapeCsv(string value)
+    {
+        if (value.Contains('"') || value.Contains(',') || value.Contains('\n') || value.Contains('\r'))
+        {
+            return $"\"{value.Replace("\"", "\"\"")}\"";
+        }
+
+        return value;
+    }
 }

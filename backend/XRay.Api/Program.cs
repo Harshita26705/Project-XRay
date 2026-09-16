@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Identity.Web;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 using XRay.Infrastructure.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -7,6 +9,16 @@ var builder = WebApplication.CreateBuilder(args);
 const string FrontendCorsPolicy = "FrontendCors";
 
 builder.Services.AddControllers();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddFixedWindowLimiter("expensive", limiterOptions =>
+    {
+        limiterOptions.PermitLimit = 10;
+        limiterOptions.Window = TimeSpan.FromMinutes(1);
+        limiterOptions.QueueLimit = 0;
+    });
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -72,8 +84,32 @@ app.UseHttpsRedirection();
 
 app.UseCors(FrontendCorsPolicy);
 
+app.UseRouting();
 app.UseAuthentication();
+
+app.Use(async (context, next) =>
+{
+    if (context.User.Identity?.IsAuthenticated == true &&
+        context.Request.RouteValues.TryGetValue("projectId", out var projectValue) &&
+        Guid.TryParse(projectValue?.ToString(), out var projectId))
+    {
+        var currentUser = context.RequestServices.GetRequiredService<XRay.Api.Services.ICurrentUserService>();
+        var db = context.RequestServices.GetRequiredService<AppDbContext>();
+        var user = await currentUser.GetOrProvisionUserAsync(context.User, context.RequestAborted);
+        var organization = await currentUser.GetOrProvisionOrganizationAsync(user, context.RequestAborted);
+        var allowed = await db.Projects.AnyAsync(project => project.ProjectId == projectId && project.OrganizationId == organization.OrganizationId && project.IsActive, context.RequestAborted);
+        if (!allowed)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+    }
+
+    await next();
+});
+
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapControllers();
 

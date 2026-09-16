@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useMemo, useState, useCallback } from 'react';
+import React, { createContext, useContext, useMemo, useState, useCallback, useEffect } from 'react';
 import { PublicClientApplication } from '@azure/msal-browser';
 import { MsalProvider, useMsal, useIsAuthenticated } from '@azure/msal-react';
 import { isAadConfigured, loginRequest, msalConfig } from './config';
@@ -47,21 +47,40 @@ function DevBypassAuthProvider({ children }: { children: React.ReactNode }) {
 function MsalBackedAuthProvider({ children }: { children: React.ReactNode }) {
   const { instance, accounts } = useMsal();
   const isAuthenticated = useIsAuthenticated();
+  const [isReady, setIsReady] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void instance.handleRedirectPromise()
+      .then((result) => {
+        if (!active) return;
+        if (result?.account) instance.setActiveAccount(result.account);
+        else if (!instance.getActiveAccount() && instance.getAllAccounts()[0]) instance.setActiveAccount(instance.getAllAccounts()[0]);
+      })
+      .finally(() => {
+        if (active) setIsReady(true);
+      });
+    return () => { active = false; };
+  }, [instance]);
 
   const login = useCallback(() => {
     void instance.loginRedirect(loginRequest);
   }, [instance]);
 
   const logout = useCallback(() => {
-    void instance.logoutRedirect();
+    void instance.logoutRedirect({ postLogoutRedirectUri: `${window.location.origin}/login` });
   }, [instance]);
 
   const getAccessToken = useCallback(async () => {
-    if (accounts.length === 0) return null;
+    const account = instance.getActiveAccount() ?? accounts[0];
+    if (!account) return null;
     try {
-      const result = await instance.acquireTokenSilent({ ...loginRequest, account: accounts[0] });
+      const result = await instance.acquireTokenSilent({ ...loginRequest, account });
       return result.accessToken;
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.name === 'InteractionRequiredAuthError') {
+        await instance.acquireTokenRedirect({ ...loginRequest, account });
+      }
       return null;
     }
   }, [instance, accounts]);
@@ -78,6 +97,7 @@ function MsalBackedAuthProvider({ children }: { children: React.ReactNode }) {
     [isAuthenticated, accounts, login, logout, getAccessToken]
   );
 
+  if (!isReady) return <div className="flex h-screen items-center justify-center bg-page text-sm text-text-muted">Connecting to Microsoft...</div>;
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
@@ -85,7 +105,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   if (!isAadConfigured) {
     return <DevBypassAuthProvider>{children}</DevBypassAuthProvider>;
   }
-  const pca = new PublicClientApplication(msalConfig);
+  const pca = useMemo(() => new PublicClientApplication(msalConfig), []);
   return (
     <MsalProvider instance={pca}>
       <MsalBackedAuthProvider>{children}</MsalBackedAuthProvider>

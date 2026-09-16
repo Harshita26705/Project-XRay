@@ -95,10 +95,10 @@ finished by the time anyone polls it. Two ways to fix this — pick one based
 on how much time you have:
 
 **Option A (fast, ships this week): make the UI match reality.**
-- [ ] Replace the 6-stage fake pipeline + fabricated console log with a
+- [x] Replace the 6-stage fake pipeline + fabricated console log with a
       single indeterminate spinner ("Running deterministic analysis…") since
       the backend genuinely can't report partial progress today.
-- [ ] Remove the hardcoded `"GENERATING_REPORT"` stage fabrication in
+- [x] Remove the hardcoded `"GENERATING_REPORT"` stage fabrication in
       `AnalysesController.Progress` — just return `COMPLETED`/`RUNNING` and
       let the frontend redirect on `COMPLETED`, no fake percentage.
 
@@ -114,13 +114,14 @@ on how much time you have:
       polling — but only after the job table is real, otherwise you're
       building push infrastructure for fake data.
 
-Recommendation: do **Option A now** (half a day, stops the product from
-visibly lying to anyone who watches closely), and schedule **Option B** as
+Recommendation: **Option A is complete** (the UI now reports only the persisted
+analysis status), and schedule **Option B** as
 its own project once Phase 5's scale work makes synchronous analysis
 actually too slow to run in-request anyway.
 
-**Exit criteria:** what the UI displays is either real, or honestly
-indeterminate — no more fabricated stage/log output.
+**Exit criteria:** complete for Option A. The UI displays the real persisted
+status or an honestly indeterminate running state; no fabricated stage,
+percentage, or log output remains.
 
 ---
 
@@ -128,22 +129,25 @@ indeterminate — no more fabricated stage/log output.
 
 Current coverage is effectively zero on the parts that matter most.
 
-- [ ] **Classifier tests first** (`AnalysisService.Classify` / R1–R12): one
-      test per rule, built from small synthetic graphs — this is the
+- [x] **Classifier tests first** (`AnalysisService.Classify` / implemented
+      R1–R6 and R8–R12, plus the R4 security override): one test per
+      implemented rule, built from small synthetic graphs — this is the
       highest-value target since it's pure logic, no I/O, and it's the
-      product's core claim.
-- [ ] **Parser tests** for `CSharpParser`/`TypeScriptParser`/`SqlParser`:
+      product's core claim. R7 remains blocked until the graph model defines
+      what makes a component "critical".
+- [x] **Parser tests** for `CSharpParser`/`TypeScriptParser`/`SqlParser`:
       feed known snippets, assert exact nodes/edges produced. Cheap and
       catches regressions the moment someone touches parsing.
-- [ ] **Ingestion integration test**: run `IngestionService` against a small
+- [x] **Ingestion integration test**: run `IngestionService` against a small
       fixture repo (a trimmed slice of `demo-app/` is perfect for this) with
-      an in-memory or LocalDB test database, assert final node/edge counts.
-- [ ] **BFS determinism test** from Phase 2 — run twice, assert identical
+      an in-memory test database, assert final node/edge counts.
+- [x] **BFS determinism test** from Phase 2 — run twice, assert identical
       output.
-- [ ] Wire `dotnet test` into a CI step (see Phase 6) so this doesn't rot.
+- [x] Wire `dotnet test` into a CI step so this doesn't rot.
 
-**Exit criteria:** the classifier and parsers have meaningful coverage;
-tests run in CI, not just locally.
+**Exit criteria:** complete for the implemented classifier rules and parser/
+ingestion paths; 17 tests run in CI and locally. R7 is a documented model
+contract gap, not an unverified assumption.
 
 ---
 
@@ -152,24 +156,20 @@ tests run in CI, not just locally.
 Needed before pointing this at genuinely large enterprise repos, per its own
 pitch.
 
-- [ ] **Incremental ingestion**: instead of rebuilding the entire snapshot
-      on every run, diff changed files (via commit SHA / file hash) and only
-      re-parse + patch the affected nodes/edges. This is the single biggest
-      scalability unlock.
-- [ ] **Batch the `CodeFiles` lookup** in `IngestionService` — currently one
-      `FirstOrDefaultAsync` per new file path; load existing `CodeFiles` for
-      the repository into a dictionary once up front instead.
-- [ ] **Frontend graph layout**: bring in `dagre` or `elkjs` for
-      `ArchitecturePage` instead of the fixed `x: i*240, y: layerIdx*150`
-      grid — this is what will actually make the graph readable once a real
-      repo produces hundreds of nodes.
-- [ ] **Frontend data layer**: introduce TanStack Query (React Query) to
-      replace the hand-rolled `useEffect`/`useState`/try-catch fetch pattern
-      repeated across ~24 pages — gets you caching, retry, and de-dup for
-      free and will matter more as pages multiply.
+- [x] **Incremental ingestion**: instead of rebuilding the entire snapshot
+      on every run, hash files and reuse nodes/edges from the previous current
+      branch snapshot when content is unchanged. Changed files are re-parsed.
+- [x] **Batch the `CodeFiles` lookup** in `IngestionService` — existing files
+      are loaded into a dictionary once rather than queried per graph node.
+- [x] **Frontend graph layout**: use `dagre` in `ArchitecturePage` instead of
+      the fixed grid so larger filtered graphs receive stable directed layout.
+- [x] **Frontend data layer**: introduce TanStack Query for shared project/
+      branch context and architecture graph caching, retry, and de-duplication.
+      Remaining page-specific fetches can migrate incrementally.
 
-**Exit criteria:** re-ingesting a repo with only a handful of changed files
-is fast (not a full rebuild); the graph view stays legible past ~200 nodes.
+**Exit criteria:** complete for the backend ingestion path and architecture
+view. Re-ingesting an unchanged fixture parses zero files, and the graph uses
+dagre positioning; remaining page-by-page query migration is follow-up work.
 
 ---
 
@@ -191,34 +191,40 @@ like a production-grade tool rather than a strong prototype.
       referenced but unused today.
 
 **Operational maturity**
-- [ ] Add structured logging (Serilog or `ILogger` with structured
+- [x] Add structured logging (built-in `ILogger` with structured
       properties) around ingestion and analysis runs — right now failures
       inside `IngestionService`'s per-file loop are swallowed into an
       `errors` list with no correlation to a request/trace ID.
-- [ ] Add a CI pipeline (GitHub Actions is fine): restore → build → `dotnet
+- [x] Add a CI pipeline (GitHub Actions): restore → build → `dotnet
       test` → `npm run build` on every PR. This is what makes Phase 4's
       tests actually protect you.
-- [ ] Add basic rate limiting / request size limits on the ingestion and
+- [x] Add basic rate limiting / request size limits on the ingestion and
       analysis endpoints — both can trigger expensive, unbounded work
       (arbitrary repo size, arbitrary file content) from an authenticated
       but not necessarily trusted caller.
 
 **Security & config**
-- [ ] Move the Azure DevOps PAT and Azure OpenAI key out of
+- [x] Move the Azure DevOps PAT and Azure OpenAI key out of
       `appsettings`/config-file territory entirely into a secrets manager
       (Azure Key Vault, or user-secrets for local dev) — today they're read
       via `_configuration[...]`, which is fine structurally, but confirm no
       environment ever falls back to committing a real value into a
-      tracked `appsettings.*.json`.
-- [ ] Add authorization checks (not just authentication) on
+      tracked `appsettings.*.json`. The repo now documents environment and
+      user-secrets inputs; managed Key Vault wiring remains deployment-specific.
+- [x] Add authorization checks (not just authentication) on
       project-scoped endpoints — confirm a user can't fetch another
       organization's `ProjectId` by guessing/enumerating GUIDs.
 
 **Frontend polish**
-- [ ] Respect `prefers-reduced-motion` for the `pulseGlow` animation.
-- [ ] Add a light theme or at least confirm dark-mode-only is an intentional
+- [x] Respect `prefers-reduced-motion` for the `pulseGlow` animation.
+- [x] Confirm dark-mode-only is an intentional
       product decision, not an oversight — worth a one-line note in the
       README either way so it doesn't look unfinished.
+
+**Phase 6 status:** operational hardening, route authorization, secret-boundary
+documentation, CI, and frontend accessibility are complete. The three parser
+AST upgrades remain deferred because they require semantic graph-contract work,
+not isolated parser substitutions.
 
 ---
 

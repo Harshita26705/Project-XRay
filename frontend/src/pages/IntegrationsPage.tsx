@@ -5,31 +5,57 @@ import { Card } from '../components/Card';
 import { Button } from '../components/Button';
 import { StatusBadge } from '../components/StatusBadge';
 
-const PROVIDERS: { code: string; name: string; purpose: string; readOnly?: boolean }[] = [
-  { code: 'AZURE_DEVOPS', name: 'Azure DevOps', purpose: 'Repositories + Pull Requests + Work Items' },
-  { code: 'SQL_SERVER', name: 'SQL Server DB', purpose: 'Database Metadata + Stored Procedures', readOnly: true },
-  { code: 'MICROSOFT_FOUNDRY', name: 'Microsoft Foundry', purpose: 'AI Reasoning + Language Logs' },
-  { code: 'AZURE_AI_SEARCH', name: 'Azure AI Search', purpose: 'Project Knowledge Retrieval + Query Slices' },
-  { code: 'MICROSOFT_TEAMS', name: 'Microsoft Teams', purpose: 'Notifications + Alert Streams' },
-  { code: 'POWER_AUTOMATE', name: 'Power Automate', purpose: 'Workflow Automation + Orchestration' }
+const PROVIDERS: { code: string; name: string; purpose: string; placeholder: string }[] = [
+  { code: 'AZURE_DEVOPS', name: 'Azure DevOps', purpose: 'Repositories + Pull Requests + Work Items', placeholder: 'https://dev.azure.com/your-organization' },
+  { code: 'SQL_SERVER', name: 'SQL Server DB', purpose: 'Database Metadata + Stored Procedures', placeholder: 'https://server.example.com' },
+  { code: 'MICROSOFT_FOUNDRY', name: 'Microsoft Foundry', purpose: 'AI Reasoning + Language Logs', placeholder: 'https://resource.openai.azure.com' },
+  { code: 'AZURE_AI_SEARCH', name: 'Azure AI Search', purpose: 'Project Knowledge Retrieval + Query Slices', placeholder: 'https://search.example.search.windows.net' },
+  { code: 'MICROSOFT_TEAMS', name: 'Microsoft Teams', purpose: 'Notifications + Alert Streams', placeholder: 'https://outlook.office.com/webhook/...' },
+  { code: 'POWER_AUTOMATE', name: 'Power Automate', purpose: 'Workflow Automation + Orchestration', placeholder: 'https://prod-00.westeurope.logic.azure.com/...' }
 ];
 
 export default function IntegrationsPage() {
   const [connections, setConnections] = useState<IntegrationConnectionResponse[]>([]);
   const [baseUrls, setBaseUrls] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [busyProvider, setBusyProvider] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<Record<string, string>>({});
 
-  const load = () => void api.listIntegrations().then(setConnections);
-  useEffect(load, []);
-
-  const ensure = async (provider: string, name: string) => {
-    let connection = connections.find((c) => c.provider === provider);
-    if (!connection) {
-      connection = await api.upsertIntegration({ provider, displayName: name, externalBaseUrl: baseUrls[provider] || undefined });
-    } else if (baseUrls[provider] !== undefined) {
-      connection = await api.upsertIntegration({ provider, displayName: name, externalBaseUrl: baseUrls[provider] || undefined });
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setConnections(await api.listIntegrations());
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : 'Unable to load integrations.');
+    } finally {
+      setLoading(false);
     }
-    await api.testIntegration(connection.integrationConnectionId);
-    load();
+  };
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const test = async (provider: typeof PROVIDERS[number]) => {
+    setBusyProvider(provider.code);
+    setError(null);
+    setFeedback((current) => ({ ...current, [provider.code]: '' }));
+    try {
+      let connection = connections.find((item) => item.provider === provider.code);
+      connection = await api.upsertIntegration({
+        provider: provider.code,
+        displayName: provider.name,
+        externalBaseUrl: baseUrls[provider.code] ?? connection?.externalBaseUrl ?? undefined
+      });
+      const tested = await api.testIntegration(connection.integrationConnectionId);
+      setConnections((current) => [...current.filter((item) => item.provider !== provider.code), tested]);
+      setFeedback((current) => ({ ...current, [provider.code]: tested.status === 'CONNECTED' ? 'Connection successful' : 'Connection failed' }));
+    } catch (reason: unknown) {
+      setFeedback((current) => ({ ...current, [provider.code]: reason instanceof Error ? reason.message : 'Connection test failed.' }));
+    } finally {
+      setBusyProvider(null);
+    }
   };
 
   return (
@@ -39,7 +65,9 @@ export default function IntegrationsPage() {
         <p className="mt-1 text-sm text-text-secondary">Manage and configure data connectors, code hosts, and enterprise AI engines.</p>
       </div>
 
-      <div className="grid grid-cols-2 gap-5">
+      {error && <div className="rounded-md border border-risk-critical/40 bg-risk-critical/10 p-3 text-sm text-risk-critical">{error}</div>}
+
+      {loading ? <div className="text-sm text-text-muted">Loading integrations...</div> : <div className="grid grid-cols-2 gap-5">
         {PROVIDERS.map((p) => {
           const connection = connections.find((c) => c.provider === p.code);
           return (
@@ -49,22 +77,24 @@ export default function IntegrationsPage() {
                 <StatusBadge status={connection?.status ?? 'NOT_CONNECTED'} />
               </div>
               <p className="mt-1 text-xs text-text-muted">{p.purpose}</p>
-              {p.code === 'AZURE_DEVOPS' && (
+              <label className="mt-3 block text-[11px] text-text-muted">
+                Endpoint
                 <input
                   value={baseUrls[p.code] ?? connection?.externalBaseUrl ?? ''}
                   onChange={(event) => setBaseUrls((current) => ({ ...current, [p.code]: event.target.value }))}
-                  placeholder="https://dev.azure.com/your-organization"
-                  className="mt-3 w-full rounded border border-border bg-cardMuted px-2 py-1.5 text-xs"
+                  placeholder={p.placeholder}
+                  className="mt-1 w-full rounded border border-border bg-cardMuted px-2 py-1.5 text-xs"
                 />
-              )}
-              {p.readOnly && <span className="mt-2 inline-block rounded border border-border px-1.5 py-0.5 text-[10px] text-text-secondary">READ-ONLY</span>}
+              </label>
               <div className="mt-3">
-                <Button onClick={() => ensure(p.code, p.name)}>Test Connection</Button>
+                <Button onClick={() => void test(p)} disabled={busyProvider !== null}>{busyProvider === p.code ? 'Testing...' : 'Save & Test Connection'}</Button>
+                {feedback[p.code] && <p className={`mt-2 text-xs ${feedback[p.code] === 'Connection successful' ? 'text-risk-safe' : 'text-risk-risky'}`}>{feedback[p.code]}</p>}
+                {connection?.lastTestedAtUtc && <p className="mt-1 text-[10px] text-text-muted">Last tested {new Date(connection.lastTestedAtUtc).toLocaleString()}</p>}
               </div>
             </Card>
           );
         })}
-      </div>
+      </div>}
     </div>
   );
 }

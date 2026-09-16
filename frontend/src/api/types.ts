@@ -14,6 +14,13 @@ export interface ProjectResponse {
   technologyTags: string[];
 }
 
+export interface BranchResponse {
+  name: string;
+  headCommitSha: string | null;
+  isDefault: boolean;
+  isIndexed: boolean;
+}
+
 export interface GraphNodeResponse {
   nodeId: string;
   externalKey: string;
@@ -36,6 +43,36 @@ export interface GraphResponse {
   snapshotId: string | null;
   nodes: GraphNodeResponse[];
   edges: GraphEdgeResponse[];
+}
+
+export interface NodeConnectionDetail {
+  neighborNodeId: string;
+  neighborName: string;
+  edgeType: string;
+  confidence: number;
+  direction: 'incoming' | 'outgoing';
+}
+
+export interface ProjectNodeDetailResponse {
+  nodeId: string;
+  externalKey: string;
+  componentType: string;
+  displayName: string;
+  filePath: string | null;
+  isParsed: boolean;
+  contains: string[];
+  incoming: NodeConnectionDetail[];
+  outgoing: NodeConnectionDetail[];
+  whyThisMatters: string | null;
+}
+
+export interface ProjectSecurityScanResponse {
+  securityScanId: string;
+  projectId: string;
+  findingCount: number;
+  status: string;
+  startedAtUtc: string;
+  completedAtUtc: string | null;
 }
 
 export interface IngestResponse {
@@ -109,6 +146,13 @@ export interface AnalysisScopeRequest {
   runStaticSecurityAnalysis: boolean;
 }
 
+export interface AnalysisImpactEdgeResponse {
+  sourceNodeId: string;
+  targetNodeId: string;
+  edgeType: string;
+  confidence: number;
+}
+
 export interface AnalysisNodeResultResponse {
   graphNodeId: string;
   displayName: string;
@@ -118,6 +162,7 @@ export interface AnalysisNodeResultResponse {
   minPathConfidence: number | null;
   ruleCode: string | null;
   isDirectlyChanged: boolean;
+  recommendation: string | null;
 }
 
 export interface AnalysisResponse {
@@ -126,21 +171,19 @@ export interface AnalysisResponse {
   changeTitle: string;
   status: string;
   overallRiskState: string | null;
+  branchName: string | null;
   criticalCount: number;
   riskyCount: number;
   safeCount: number;
   unknownCount: number;
   createdAtUtc: string;
   completedAtUtc: string | null;
+  edges: AnalysisImpactEdgeResponse[];
   nodes: AnalysisNodeResultResponse[];
 }
 
 export interface AnalysisProgressResponse {
-  stageCode: string;
   statusCode: string;
-  percentComplete: number;
-  componentsTraced: number | null;
-  estimatedChains: number | null;
 }
 
 export interface EvidenceResponse {
@@ -205,6 +248,14 @@ export interface AiConfigurationResponse {
   deploymentStatus: string;
   activeModel: string | null;
   knowledgeLayer: string;
+}
+
+export interface UpdateAiConfigurationRequest {
+  provider: string;
+  activeModel: string | null;
+  temperature: number | null;
+  maxTokens: number | null;
+  systemPromptOverride: string | null;
 }
 
 export interface NotificationChannelResponse {

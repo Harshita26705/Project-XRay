@@ -16,7 +16,7 @@ If evidence is incomplete, the result says `UNKNOWN` — never silently `SAFE`.
 | --- | --- |
 | Backend | ASP.NET Core (.NET 9) Web API, EF Core **Code-First** against SQL Server |
 | Database | SQL Server (LocalDB for local dev) — full normalized schema, see [`Figma/schema.md`](Figma/schema.md) |
-| Deterministic engine | C# — Roslyn-based C# parser, regex-based TypeScript/SQL parsers, BFS blast radius, R1–R12 classifier |
+| Graph construction | `XRay.Parsers` structural parsers + `IngestionService` snapshot pipeline; deterministic `AnalysisService` computes blast radius and classification |
 | Auth | Microsoft Entra ID (Azure AD) via MSAL — with a local dev-only bypass so you can run the app before an App Registration exists |
 | Frontend | React 18 + TypeScript + Vite + Tailwind + React Flow, routed with React Router |
 
@@ -51,9 +51,9 @@ backend/
   XRay.Domain/          Entities for every schema.md table (Identity, Projects, Graph, Analysis, Security, AI, ...)
   XRay.Infrastructure/   EF Core AppDbContext, fluent model configuration, migrations, seed data
   XRay.Application/      (thin — DTOs mostly live next to controllers, see technical-guide.md)
-  XRay.Api/              Controllers, services (ingestion, analysis engine, security scan, AI explain, reports, ...), Program.cs, auth
-  XRay.Parsers/          C# (Roslyn), TypeScript (regex/heuristic), SQL (regex) structural parsers
-  XRay.Tests/            xunit tests
+  XRay.Api/              Controllers, services (ingestion, analysis logic, security scan, AI explain, reports, ...), Program.cs, auth
+  XRay.Parsers/          Canonical structural parsers used by the app (C#, TypeScript, SQL)
+  XRay.Tests/            xUnit tests for the active runtime path
 
 frontend/
   src/api/               Typed API client
@@ -63,9 +63,11 @@ frontend/
   src/state/             ProjectContext (current project selection)
 
 demo-app/                Sample CGOne-style app (.NET API + React + SQL) used as the analysis target — not part of X-Ray itself
-Figma/                   Design source of truth: schema.md (DB schema) and prompt.md (frontend spec) + reference screenshots
+Figma/                   Scratch / cross-transfer dump: prompts, notes, screenshots, and schema artifacts used during design handoff; not a canonical source-of-truth for the app itself
 documents/               Setup, technical, and user guides
 ```
+
+> Note: the `Figma/` folder is intentionally a working scratch area for handoff and design transfer, not a guaranteed production asset set. Treat it as reviewable reference material, not something to delete without checking whether a teammate still needs a transferred artifact.
 
 ## Classification rules (R1–R12)
 
@@ -93,9 +95,11 @@ Every non-SAFE node carries the exact graph path that produced its state (source
 
 ## Known limitations / next steps
 
+- The dashboard intentionally uses a dark theme for dense graph and risk review workflows; users with `prefers-reduced-motion` receive minimal animation.
 - The deterministic analysis engine runs synchronously in-request rather than via the `Job` table + background worker (the table exists in the schema; nothing dispatches to it yet).
 - No SignalR push for the Analysis Progress screen yet — it's a polling-shaped contract for now.
 - The TypeScript parser is regex/heuristic (no ts-morph/real AST); the SQL parser is regex-based even though `Microsoft.SqlServer.TransactSql.ScriptDom` is referenced for a future upgrade.
+- Gemini is the LLM provider for all evaluations. Set `Gemini:ApiKey` in `appsettings.json` as instructed locally; the tracked value is only a placeholder. The endpoint, model, temperature, and output-token settings are also under `Gemini` in appsettings.
 - Azure DevOps and Microsoft Foundry integrations get a real HTTP connectivity probe on "Test Connection"; Azure AI Search, Microsoft Teams, and Power Automate are modeled with connection state but "Test Connection" is currently simulated.
 - C# analysis is class-level (Roslyn syntax tree only, no semantic model), so identically named classes in different namespaces can collapse into one node.
 - Dependency detection is structural, not semantic; reflection and fully dynamic dispatch are not resolved.

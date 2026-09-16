@@ -22,15 +22,18 @@ public class AnalysisService
 
     private readonly AppDbContext _db;
     private readonly SecurityScanService _security;
+    private readonly ILogger<AnalysisService> _logger;
 
-    public AnalysisService(AppDbContext db, SecurityScanService security)
+    public AnalysisService(AppDbContext db, SecurityScanService security, ILogger<AnalysisService> logger)
     {
         _db = db;
         _security = security;
+        _logger = logger;
     }
 
     public async Task<AnalysisResponse> CreateAndRunAsync(Guid organizationId, Guid requestedByUserId, CreateAnalysisRequest request, CancellationToken ct = default)
     {
+        _logger.LogInformation("Starting analysis for change {ChangeId} requested by {UserId}", request.ChangeId, requestedByUserId);
         var change = await _db.Changes.FirstOrDefaultAsync(c => c.ChangeId == request.ChangeId, ct)
                      ?? throw new InvalidOperationException("Change not found.");
 
@@ -84,6 +87,8 @@ public class AnalysisService
 
         await RunDeterministicEngineAsync(analysis, snapshot, change.ChangeId, scope.RunStaticSecurityAnalysis, ct);
 
+        _logger.LogInformation("Completed analysis {AnalysisId}", analysis.AnalysisId);
+
         return await ToResponseAsync(analysis, ct);
     }
 
@@ -103,67 +108,12 @@ public class AnalysisService
         var changedNodeIds = nodes.Where(n => n.CodeFileId is not null && codeFiles.Any(f => f.CodeFileId == n.CodeFileId && changedPaths.Contains(f.RelativePath)))
             .Select(n => n.GraphNodeId).ToHashSet();
 
-        // Reverse adjacency: who depends on X (i.e. edges pointing INTO X), so we can walk "dependents of the change".
-        var incoming = edges.GroupBy(e => e.TargetNodeId).ToDictionary(g => g.Key, g => g.ToList());
-
-        var bestDistance = new Dictionary<Guid, int>();
-        var bestConfidence = new Dictionary<Guid, decimal>();
-        var bestRuntimeResolved = new Dictionary<Guid, bool>();
-        var bestPathEdges = new Dictionary<Guid, List<GraphEdge>>();
-        var beyondDepth = new HashSet<Guid>();
-
-        // BFS from each changed node, walking backwards along incoming edges (dependents).
-        var frontier = new Queue<(Guid NodeId, int Distance, decimal MinConfidence, bool RuntimeResolved, List<GraphEdge> Path)>();
-        foreach (var changedId in changedNodeIds)
-        {
-            frontier.Enqueue((changedId, 0, 1.0m, false, new List<GraphEdge>()));
-        }
-
-        var visited = new HashSet<Guid>(changedNodeIds);
-        var unboundedVisited = new HashSet<Guid>(changedNodeIds);
-
-        while (frontier.Count > 0)
-        {
-            var (nodeId, distance, minConf, runtime, path) = frontier.Dequeue();
-
-            if (!changedNodeIds.Contains(nodeId))
-            {
-                if (!bestDistance.TryGetValue(nodeId, out var existingDist) || distance < existingDist)
-                {
-                    bestDistance[nodeId] = distance;
-                    bestConfidence[nodeId] = minConf;
-                    bestRuntimeResolved[nodeId] = runtime;
-                    bestPathEdges[nodeId] = path;
-                }
-            }
-
-            if (distance >= MaxDepth) continue;
-            if (!incoming.TryGetValue(nodeId, out var dependentEdges)) continue;
-
-            foreach (var edge in dependentEdges)
-            {
-                if (visited.Contains(edge.SourceNodeId) && bestDistance.TryGetValue(edge.SourceNodeId, out var d) && d <= distance + 1) continue;
-                visited.Add(edge.SourceNodeId);
-                var newPath = new List<GraphEdge>(path) { edge };
-                frontier.Enqueue((edge.SourceNodeId, distance + 1, Math.Min(minConf, edge.Confidence), runtime || edge.IsRuntimeResolved, newPath));
-            }
-        }
-
-        // Unbounded pass (no depth cap) to find nodes that are reachable but beyond MaxDepth (R11).
-        var unboundedFrontier = new Queue<Guid>(changedNodeIds);
-        while (unboundedFrontier.Count > 0)
-        {
-            var nodeId = unboundedFrontier.Dequeue();
-            if (!incoming.TryGetValue(nodeId, out var dependentEdges)) continue;
-            foreach (var edge in dependentEdges)
-            {
-                if (unboundedVisited.Add(edge.SourceNodeId))
-                {
-                    if (!bestDistance.ContainsKey(edge.SourceNodeId)) beyondDepth.Add(edge.SourceNodeId);
-                    unboundedFrontier.Enqueue(edge.SourceNodeId);
-                }
-            }
-        }
+        var reachability = ComputeDeterministicReachability(edges, changedNodeIds, MaxDepth);
+        var bestDistance = reachability.BestDistance;
+        var bestConfidence = reachability.BestConfidence;
+        var bestRuntimeResolved = reachability.BestRuntimeResolved;
+        var bestPathEdges = reachability.BestPathEdges;
+        var beyondDepth = reachability.BeyondDepth;
 
         var riskStateIds = await _db.RiskStates.ToDictionaryAsync(r => r.Code, r => r.Id, ct);
         var evidenceTypeIds = await _db.EvidenceTypes.ToDictionaryAsync(e => e.Code, e => e.Id, ct);
@@ -193,7 +143,6 @@ public class AnalysisService
             results.Add(result);
             _db.AnalysisNodeResults.Add(result);
 
-            // Evidence: direct change
             if (result.IsDirectlyChanged && node.CodeFileId is not null)
             {
                 var path = codeFiles.FirstOrDefault(f => f.CodeFileId == node.CodeFileId)?.RelativePath;
@@ -255,6 +204,100 @@ public class AnalysisService
         await _db.SaveChangesAsync(ct);
     }
 
+    public static DeterministicReachabilityResult ComputeDeterministicReachability(IEnumerable<GraphEdge> edges, IEnumerable<Guid> changedNodeIds, int maxDepth)
+    {
+        var incoming = edges.GroupBy(e => e.TargetNodeId).ToDictionary(g => g.Key, g => g.OrderBy(e => e.GraphEdgeId).ToList());
+        var bestDistance = new Dictionary<Guid, int>();
+        var bestConfidence = new Dictionary<Guid, decimal>();
+        var bestRuntimeResolved = new Dictionary<Guid, bool>();
+        var bestPathEdges = new Dictionary<Guid, List<GraphEdge>>();
+        var beyondDepth = new HashSet<Guid>();
+
+        foreach (var changedNodeId in changedNodeIds.Distinct())
+        {
+            bestDistance[changedNodeId] = 0;
+            bestConfidence[changedNodeId] = 1m;
+            bestRuntimeResolved[changedNodeId] = false;
+            bestPathEdges[changedNodeId] = new List<GraphEdge>();
+        }
+
+        var frontier = new Queue<(Guid NodeId, int Distance, decimal MinConfidence, bool RuntimeResolved, List<GraphEdge> Path)>();
+        var bestStateByNode = new Dictionary<Guid, (int Distance, decimal MinConfidence, string PathKey)>();
+
+        foreach (var changedNodeId in changedNodeIds.Distinct())
+        {
+            var seed = (changedNodeId, 0, 1m, false, new List<GraphEdge>());
+            frontier.Enqueue(seed);
+            bestStateByNode[changedNodeId] = (0, 1m, string.Empty);
+        }
+
+        while (frontier.Count > 0)
+        {
+            var current = frontier.Dequeue();
+            if (!bestDistance.TryGetValue(current.NodeId, out var knownDistance) || current.Distance < knownDistance)
+            {
+                bestDistance[current.NodeId] = current.Distance;
+                bestConfidence[current.NodeId] = current.MinConfidence;
+                bestRuntimeResolved[current.NodeId] = current.RuntimeResolved;
+                bestPathEdges[current.NodeId] = current.Path;
+            }
+
+            if (current.Distance >= maxDepth || !incoming.TryGetValue(current.NodeId, out var dependentEdges))
+            {
+                continue;
+            }
+
+            foreach (var edge in dependentEdges)
+            {
+                var nextNodeId = edge.SourceNodeId;
+                var nextDistance = current.Distance + 1;
+                var nextMinConfidence = Math.Min(current.MinConfidence, edge.Confidence);
+                var nextRuntimeResolved = current.RuntimeResolved || edge.IsRuntimeResolved;
+                var nextPath = new List<GraphEdge>(current.Path) { edge };
+                var nextPathKey = string.Join("|", nextPath.Select(e => e.GraphEdgeId));
+
+                if (bestStateByNode.TryGetValue(nextNodeId, out var prior) &&
+                    (nextDistance > prior.Distance ||
+                     (nextDistance == prior.Distance && (nextMinConfidence > prior.MinConfidence ||
+                        (nextMinConfidence == prior.MinConfidence && string.CompareOrdinal(nextPathKey, prior.PathKey) >= 0))))
+                )
+                {
+                    continue;
+                }
+
+                bestStateByNode[nextNodeId] = (nextDistance, nextMinConfidence, nextPathKey);
+                bestDistance[nextNodeId] = nextDistance;
+                bestConfidence[nextNodeId] = nextMinConfidence;
+                bestRuntimeResolved[nextNodeId] = nextRuntimeResolved;
+                bestPathEdges[nextNodeId] = nextPath;
+                frontier.Enqueue((nextNodeId, nextDistance, nextMinConfidence, nextRuntimeResolved, nextPath));
+            }
+        }
+
+        var unboundedFrontier = new Queue<Guid>(changedNodeIds.Distinct());
+        var unboundedVisited = new HashSet<Guid>(changedNodeIds.Distinct());
+        while (unboundedFrontier.Count > 0)
+        {
+            var nodeId = unboundedFrontier.Dequeue();
+            if (!incoming.TryGetValue(nodeId, out var dependentEdges)) continue;
+            foreach (var edge in dependentEdges)
+            {
+                if (!unboundedVisited.Add(edge.SourceNodeId)) continue;
+                if (!bestDistance.ContainsKey(edge.SourceNodeId)) beyondDepth.Add(edge.SourceNodeId);
+                unboundedFrontier.Enqueue(edge.SourceNodeId);
+            }
+        }
+
+        return new DeterministicReachabilityResult(bestDistance, bestConfidence, bestRuntimeResolved, bestPathEdges, beyondDepth);
+    }
+
+    public sealed record DeterministicReachabilityResult(
+        Dictionary<Guid, int> BestDistance,
+        Dictionary<Guid, decimal> BestConfidence,
+        Dictionary<Guid, bool> BestRuntimeResolved,
+        Dictionary<Guid, List<GraphEdge>> BestPathEdges,
+        HashSet<Guid> BeyondDepth);
+
     private async Task AttachSecurityEvidenceAsync(Guid analysisId, Guid scanId, byte evidenceTypeId, Dictionary<string, byte> riskStateIds, List<AnalysisNodeResult> results, CancellationToken ct)
     {
         var findings = await _db.SecurityFindings.Where(f => f.SecurityScanId == scanId).ToListAsync(ct);
@@ -281,16 +324,20 @@ public class AnalysisService
             if (severity is not ("CRITICAL" or "HIGH")) continue;
 
             var result = results.FirstOrDefault(r => r.GraphNodeId == finding.GraphNodeId);
-            if (result is not null && result.RiskStateId != riskStateIds["CRITICAL"])
-            {
-                result.RiskStateId = riskStateIds["CRITICAL"];
-                result.RuleCode = "R4";
-                result.IsSecurityAffected = true;
-            }
+            ApplySecurityFindingOverride(severity, result, riskStateIds["CRITICAL"]);
         }
     }
 
-    private static (string RiskCode, string RuleCode, int? Distance, decimal? Confidence, bool IsRuntime, bool IsBeyond) Classify(
+    internal static void ApplySecurityFindingOverride(string? severity, AnalysisNodeResult? result, byte criticalRiskStateId)
+    {
+        if (severity is not ("CRITICAL" or "HIGH") || result is null || result.RiskStateId == criticalRiskStateId) return;
+
+        result.RiskStateId = criticalRiskStateId;
+        result.RuleCode = "R4";
+        result.IsSecurityAffected = true;
+    }
+
+    internal static (string RiskCode, string RuleCode, int? Distance, decimal? Confidence, bool IsRuntime, bool IsBeyond) Classify(
         GraphNode node, bool isChanged,
         Dictionary<Guid, int> bestDistance, Dictionary<Guid, decimal> bestConfidence,
         Dictionary<Guid, bool> bestRuntimeResolved, HashSet<Guid> beyondDepth)
@@ -349,6 +396,88 @@ public class AnalysisService
         }
     }
 
+    internal static string BuildRecommendation(string? ruleCode, bool isDirectlyChanged, int? distance, decimal? confidence)
+    {
+        if (isDirectlyChanged) return "Add a contract test before merging; this node is directly in the change set.";
+
+        return ruleCode switch
+        {
+            "R1" => "The node could not be parsed. Re-index and validate ingestion before trusting this path.",
+            "R2" => "This node was changed but only partially parsed. Treat it as a partial-data risk until the graph is refreshed.",
+            "R3" => "This node was directly changed. Add a targeted regression test and verify its public contract before merge.",
+            "R5" => "This is a high-risk dependency within one hop of the change. Validate the contract and behavior end-to-end.",
+            "R6" => "This path is close to the change but not directly edited. Add a focused integration check for the dependency boundary.",
+            "R8" => "This is an indirect dependency. Trace the path and confirm there is enough coverage for the transitive impact.",
+            "R9" => "Confidence is low because this path resolves at runtime. Verify manually before shipping.",
+            "R10" => "This node is partially parsed, so the path risk is uncertain. Re-check the node metadata and validate manually.",
+            "R11" => "This path sits beyond the configured depth horizon. Manually verify the runtime route and any hidden dependency chains.",
+            _ => distance is not null && confidence is not null
+                ? $"Review the dependency path ({distance} hop(s), {confidence.Value:P0} confidence) and add a focused test to reduce risk."
+                : "Review the dependency path and add a focused regression check before merging."
+        };
+    }
+
+    public async Task<IReadOnlyList<AnalysisImpactEdgeResponse>> GetImpactGraphAsync(Guid analysisId, CancellationToken ct = default)
+    {
+        var analysis = await _db.Analyses.FirstOrDefaultAsync(a => a.AnalysisId == analysisId, ct)
+            ?? throw new InvalidOperationException("Analysis not found.");
+
+        if (analysis.ChangeId is null)
+        {
+            return Array.Empty<AnalysisImpactEdgeResponse>();
+        }
+
+        var snapshotId = analysis.GraphSnapshotId ?? await _db.GraphSnapshots
+            .Where(s => s.ProjectId == analysis.ProjectId && s.IsCurrent)
+            .Select(s => s.GraphSnapshotId)
+            .FirstOrDefaultAsync(ct);
+
+        if (snapshotId == Guid.Empty)
+        {
+            return Array.Empty<AnalysisImpactEdgeResponse>();
+        }
+
+        var nodes = await _db.GraphNodes.Where(n => n.GraphSnapshotId == snapshotId).ToListAsync(ct);
+        var edges = await _db.GraphEdges.Where(e => e.GraphSnapshotId == snapshotId).ToListAsync(ct);
+        var areaFiles = await _db.ChangeFiles.Where(f => f.ChangeId == analysis.ChangeId.Value).Select(f => f.RelativePath).ToListAsync(ct);
+
+        var changedNodeIds = nodes
+            .Where(n => n.CodeFileId is not null)
+            .Join(
+                await _db.CodeFiles.Where(f => f.RepositoryId == _db.Repositories.Where(r => r.ProjectId == analysis.ProjectId).Select(r => r.RepositoryId).FirstOrDefault()).ToListAsync(ct),
+                n => n.CodeFileId,
+                f => f.CodeFileId,
+                (n, f) => new { Node = n, Path = f.RelativePath })
+            .Where(x => areaFiles.Contains(x.Path))
+            .Select(x => x.Node.GraphNodeId)
+            .ToHashSet();
+
+        if (changedNodeIds.Count == 0)
+        {
+            changedNodeIds = (await _db.AnalysisNodeResults
+                .Where(r => r.AnalysisId == analysisId)
+                .Select(r => r.GraphNodeId)
+                .Distinct()
+                .ToListAsync(ct))
+                .ToHashSet();
+        }
+
+        var reachability = ComputeDeterministicReachability(edges, changedNodeIds, MaxDepth);
+        var edgeTypeCodes = await _db.GraphEdgeTypes.ToDictionaryAsync(e => e.Id, e => e.Code, ct);
+
+        return reachability.BestPathEdges
+            .SelectMany(kvp => kvp.Value)
+            .GroupBy(edge => new { edge.SourceNodeId, edge.TargetNodeId, edge.GraphEdgeTypeId, edge.Confidence })
+            .Select(g => new AnalysisImpactEdgeResponse(
+                g.Key.SourceNodeId,
+                g.Key.TargetNodeId,
+                edgeTypeCodes.GetValueOrDefault(g.Key.GraphEdgeTypeId, "USES"),
+                g.Key.Confidence))
+            .OrderBy(e => e.SourceNodeId)
+            .ThenBy(e => e.TargetNodeId)
+            .ToList();
+    }
+
     public async Task<AnalysisResponse?> GetAsync(Guid analysisId, CancellationToken ct = default)
     {
         var analysis = await _db.Analyses.FirstOrDefaultAsync(a => a.AnalysisId == analysisId, ct);
@@ -379,10 +508,13 @@ public class AnalysisService
         var nodeDtos = nodeResults.Select(r =>
         {
             graphNodeById.TryGetValue(r.GraphNodeId, out var gn);
+            var recommendation = BuildRecommendation(r.RuleCode, r.IsDirectlyChanged, r.Distance, r.MinPathConfidence);
             return new AnalysisNodeResultResponse(
                 r.GraphNodeId, gn?.DisplayName ?? "(unknown)", gn is null ? "UNKNOWN" : componentTypes.GetValueOrDefault(gn.ComponentTypeId, "UNKNOWN"),
-                riskStates.GetValueOrDefault(r.RiskStateId, "UNKNOWN"), r.Distance, r.MinPathConfidence, r.RuleCode, r.IsDirectlyChanged);
+                riskStates.GetValueOrDefault(r.RiskStateId, "UNKNOWN"), r.Distance, r.MinPathConfidence, r.RuleCode, r.IsDirectlyChanged, recommendation);
         }).ToList();
+
+        var edges = await GetImpactGraphAsync(analysis.AnalysisId, ct);
 
         return new AnalysisResponse(
             analysis.AnalysisId, analysis.ChangeId ?? Guid.Empty, change?.Title ?? "(manual analysis)",
@@ -393,6 +525,6 @@ public class AnalysisService
             nodeDtos.Count(n => n.RiskState == "RISKY"),
             nodeDtos.Count(n => n.RiskState == "SAFE"),
             nodeDtos.Count(n => n.RiskState == "UNKNOWN"),
-            analysis.CreatedAtUtc, analysis.CompletedAtUtc, nodeDtos);
+            analysis.CreatedAtUtc, analysis.CompletedAtUtc, edges, nodeDtos);
     }
 }

@@ -47,3 +47,12 @@ export const post = <T>(path: string, body?: unknown) =>
   apiFetch<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) });
 export const put = <T>(path: string, body?: unknown) =>
   apiFetch<T>(path, { method: 'PUT', body: body === undefined ? undefined : JSON.stringify(body) });
+export const del = <T = undefined>(path: string) => apiFetch<T>(path, { method: 'DELETE' });
+
+export async function download(path: string): Promise<Blob> {
+  const token = tokenGetter ? await tokenGetter() : null;
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const response = await fetch(`${API_BASE}${path}`, { headers });
+  if (!response.ok) throw new ApiError(response.status, response.statusText);
+  return response.blob();
+}

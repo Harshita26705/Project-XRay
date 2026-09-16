@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using XRay.Api.Contracts;
 using XRay.Domain.Identity;
 using XRay.Domain.Projects;
+using XRay.Domain.Security;
 using XRay.Infrastructure.Persistence;
 
 namespace XRay.Api.Services;
@@ -98,6 +99,57 @@ public class ProjectService
             return await ToResponseAsync(winner, ct);
         }
         return await ToResponseAsync(project, ct);
+    }
+
+    public async Task<ProjectResponse> UpdateAsync(Guid projectId, UpdateProjectRequest request, CancellationToken ct = default)
+    {
+        var project = await _db.Projects.FirstOrDefaultAsync(p => p.ProjectId == projectId, ct)
+            ?? throw new InvalidOperationException("Project not found.");
+
+        project.Name = request.Name;
+        project.Description = request.Description;
+        project.UpdatedAtUtc = DateTime.UtcNow;
+
+        await _db.SaveChangesAsync(ct);
+        return await ToResponseAsync(project, ct);
+    }
+
+    public async Task DeleteAsync(Guid projectId, CancellationToken ct = default)
+    {
+        var project = await _db.Projects.FirstOrDefaultAsync(p => p.ProjectId == projectId, ct)
+            ?? throw new InvalidOperationException("Project not found.");
+
+        var analysisIds = await _db.Analyses.Where(a => a.ProjectId == projectId).Select(a => a.AnalysisId).ToListAsync(ct);
+        var snapshotIds = await _db.GraphSnapshots.Where(s => s.ProjectId == projectId).Select(s => s.GraphSnapshotId).ToListAsync(ct);
+
+        _db.AnalysisNodeResults.RemoveRange(_db.AnalysisNodeResults.Where(r => analysisIds.Contains(r.AnalysisId)));
+        _db.Evidences.RemoveRange(_db.Evidences.Where(e => analysisIds.Contains(e.AnalysisId)));
+        _db.AnalysisScopes.RemoveRange(_db.AnalysisScopes.Where(s => analysisIds.Contains(s.AnalysisId)));
+        _db.AnalysisProgresses.RemoveRange(_db.AnalysisProgresses.Where(p => analysisIds.Contains(p.AnalysisId)));
+        _db.AnalysisTelemetries.RemoveRange(_db.AnalysisTelemetries.Where(t => analysisIds.Contains(t.AnalysisId)));
+        _db.SecurityFindingEvidences.RemoveRange(_db.SecurityFindingEvidences.Where(e => _db.SecurityFindings.Any(f => f.SecurityFindingId == e.SecurityFindingId && _db.SecurityScans.Any(s => s.SecurityScanId == f.SecurityScanId && analysisIds.Contains(s.AnalysisId)))));
+        _db.SecurityFindings.RemoveRange(_db.SecurityFindings.Where(f => _db.SecurityScans.Any(s => s.SecurityScanId == f.SecurityScanId && analysisIds.Contains(s.AnalysisId))));
+        _db.SecurityScans.RemoveRange(_db.SecurityScans.Where(s => analysisIds.Contains(s.AnalysisId)));
+        _db.GraphEdges.RemoveRange(_db.GraphEdges.Where(e => snapshotIds.Contains(e.GraphSnapshotId)));
+        _db.GraphNodes.RemoveRange(_db.GraphNodes.Where(n => snapshotIds.Contains(n.GraphSnapshotId)));
+        _db.GraphSnapshots.RemoveRange(_db.GraphSnapshots.Where(s => s.ProjectId == projectId));
+        _db.ChangeFiles.RemoveRange(_db.ChangeFiles.Where(c => _db.Changes.Any(change => change.ChangeId == c.ChangeId && change.ProjectId == projectId)));
+        _db.Changes.RemoveRange(_db.Changes.Where(c => c.ProjectId == projectId));
+        _db.Analyses.RemoveRange(_db.Analyses.Where(a => a.ProjectId == projectId));
+        _db.ProjectMembers.RemoveRange(_db.ProjectMembers.Where(m => m.ProjectId == projectId));
+        _db.ProjectEnvironments.RemoveRange(_db.ProjectEnvironments.Where(e => e.ProjectId == projectId));
+        _db.Repositories.RemoveRange(_db.Repositories.Where(r => r.ProjectId == projectId));
+        _db.Projects.Remove(project);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    public async Task<SecurityScan> CreateProjectSecurityScanAsync(Guid projectId, string repositoryRootPath, CancellationToken ct = default)
+    {
+        var project = await _db.Projects.FirstOrDefaultAsync(p => p.ProjectId == projectId, ct)
+            ?? throw new InvalidOperationException("Project not found.");
+
+        var service = new SecurityScanService(_db);
+        return await service.RunProjectScanAsync(projectId, repositoryRootPath, ct);
     }
 
     public async Task<OverviewResponse> GetOverviewAsync(Guid organizationId, CancellationToken ct = default)

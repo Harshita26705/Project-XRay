@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using System.Security.Cryptography;
+using System.Text;
 using XRay.Api.Contracts;
 using XRay.Api.Services.Repositories;
 using XRay.Domain.Changes;
@@ -21,19 +23,22 @@ public class IngestionService
     private readonly AppDbContext _db;
     private readonly RepositoryProviderFactory _providerFactory;
     private readonly IConfiguration _configuration;
+    private readonly ILogger<IngestionService> _logger;
     private readonly CSharpParser _csharpParser = new();
     private readonly TypeScriptParser _tsParser = new();
     private readonly SqlParser _sqlParser = new();
 
-    public IngestionService(AppDbContext db, RepositoryProviderFactory providerFactory, IConfiguration configuration)
+    public IngestionService(AppDbContext db, RepositoryProviderFactory providerFactory, IConfiguration configuration, ILogger<IngestionService> logger)
     {
         _db = db;
         _providerFactory = providerFactory;
         _configuration = configuration;
+        _logger = logger;
     }
 
     public async Task<IngestResponse> IngestAsync(Guid projectId, IngestRequest request, CancellationToken ct = default)
     {
+        _logger.LogInformation("Starting ingestion for project {ProjectId} and branch {BranchName}", projectId, request.BranchName ?? "default");
         var repository = await _db.Repositories.FirstOrDefaultAsync(r => r.ProjectId == projectId, ct)
                           ?? throw new InvalidOperationException("Project has no repository configured.");
 
@@ -82,15 +87,40 @@ public class IngestionService
 
         var files = await provider.ListFilesAsync(connection, branchName, ct);
 
+        var componentTypeCodesById = await _db.ComponentTypes.ToDictionaryAsync(c => c.Id, c => c.Code, ct);
+        var edgeTypeCodesById = await _db.GraphEdgeTypes.ToDictionaryAsync(e => e.Id, e => e.Code, ct);
+        var codeFilesByPath = (await _db.CodeFiles
+                .Where(f => f.RepositoryId == repository.RepositoryId)
+                .ToListAsync(ct))
+            .ToDictionary(f => f.RelativePath, f => f, StringComparer.OrdinalIgnoreCase);
+        var previousSnapshot = await _db.GraphSnapshots
+            .Where(s => s.ProjectId == projectId && s.BranchId == branch.BranchId && s.IsCurrent)
+            .FirstOrDefaultAsync(ct);
+        var previousNodes = previousSnapshot is null
+            ? new List<GraphNode>()
+            : await _db.GraphNodes.Where(n => n.GraphSnapshotId == previousSnapshot.GraphSnapshotId).ToListAsync(ct);
+        var previousEdges = previousSnapshot is null
+            ? new List<GraphEdge>()
+            : await _db.GraphEdges.Where(e => e.GraphSnapshotId == previousSnapshot.GraphSnapshotId).ToListAsync(ct);
+        var previousNodeById = previousNodes.ToDictionary(n => n.GraphNodeId);
+        var previousEdgesByCodeFile = previousEdges
+            .Where(e => e.SourceCodeFileId is not null)
+            .GroupBy(e => e.SourceCodeFileId!.Value)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
         var allNodes = new Dictionary<string, ParsedNode>(StringComparer.OrdinalIgnoreCase);
         var allEdges = new List<ParsedEdge>();
         var errors = new List<string>();
         var parsedCount = 0;
         var failedCount = 0;
+        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var file in files)
         {
-            var relative = NormalizePath(Path.GetRelativePath(rootPath, file));
+            // Providers return repository-relative paths. Keeping this normalization here makes
+            // the parser pipeline independent from local filesystem roots and remote REST paths.
+            var relative = NormalizePath(file.RelativePath);
+            seenPaths.Add(relative);
             string text;
             try
             {
@@ -99,9 +129,64 @@ public class IngestionService
             catch (Exception ex)
             {
                 errors.Add($"{relative}: {ex.Message}");
+                _logger.LogWarning(ex, "Unable to read repository file {RelativePath} during ingestion {IngestionRunId}", relative, run.IngestionRunId);
                 failedCount++;
                 continue;
             }
+
+            var contentHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+            if (!codeFilesByPath.TryGetValue(relative, out var codeFile))
+            {
+                codeFile = new CodeFile
+                {
+                    CodeFileId = Guid.NewGuid(),
+                    RepositoryId = repository.RepositoryId,
+                    RelativePath = relative,
+                    FileExtension = Path.GetExtension(relative),
+                    CreatedAtUtc = DateTime.UtcNow,
+                    UpdatedAtUtc = DateTime.UtcNow,
+                };
+                _db.CodeFiles.Add(codeFile);
+                codeFilesByPath[relative] = codeFile;
+            }
+
+            var hasPreviousGraphData = previousNodes.Any(n => n.CodeFileId == codeFile.CodeFileId)
+                                       || previousEdgesByCodeFile.ContainsKey(codeFile.CodeFileId);
+            if (previousSnapshot is not null && codeFile.CurrentContentHash == contentHash && hasPreviousGraphData)
+            {
+                foreach (var node in previousNodes.Where(n => n.CodeFileId == codeFile.CodeFileId))
+                {
+                    allNodes[node.ExternalKey] = new ParsedNode(
+                        node.ExternalKey,
+                        componentTypeCodesById.GetValueOrDefault(node.ComponentTypeId, ComponentTypeCodes.Unknown),
+                        node.DisplayName,
+                        relative,
+                        null,
+                        null,
+                        node.IsPartial);
+                }
+
+                foreach (var edge in previousEdgesByCodeFile.GetValueOrDefault(codeFile.CodeFileId, new List<GraphEdge>()))
+                {
+                    if (!previousNodeById.TryGetValue(edge.SourceNodeId, out var source) ||
+                        !previousNodeById.TryGetValue(edge.TargetNodeId, out var target)) continue;
+
+                    allEdges.Add(new ParsedEdge(
+                        source.ExternalKey,
+                        target.ExternalKey,
+                        edgeTypeCodesById.GetValueOrDefault(edge.GraphEdgeTypeId, GraphEdgeTypeCodes.Uses),
+                        edge.Confidence,
+                        edge.ParserRule,
+                        relative,
+                        edge.SourceLine,
+                        edge.IsRuntimeResolved));
+                }
+
+                continue;
+            }
+
+            codeFile.CurrentContentHash = contentHash;
+            codeFile.UpdatedAtUtc = DateTime.UtcNow;
 
             var result = relative switch
             {
@@ -114,6 +199,7 @@ public class IngestionService
             if (result.Errors.Count > 0)
             {
                 errors.AddRange(result.Errors);
+                _logger.LogWarning("Parser reported {ErrorCount} errors for {RelativePath} during ingestion {IngestionRunId}", result.Errors.Count, relative, run.IngestionRunId);
                 failedCount++;
             }
             else
@@ -136,6 +222,12 @@ public class IngestionService
                 TargetExternalKey = NormalizeExternalKey(edge.TargetExternalKey),
                 RelativeFilePath = edge.RelativeFilePath is null ? null : NormalizePath(edge.RelativeFilePath)
             }));
+        }
+
+        foreach (var codeFile in codeFilesByPath.Values.Where(f => !seenPaths.Contains(f.RelativePath)))
+        {
+            codeFile.IsDeleted = true;
+            codeFile.UpdatedAtUtc = DateTime.UtcNow;
         }
 
         // Materialize unresolved edge targets/sources as EXTERNAL placeholder nodes.
@@ -169,8 +261,8 @@ public class IngestionService
         };
         _db.GraphSnapshots.Add(snapshot);
 
-        var componentTypeIds = await _db.ComponentTypes.ToDictionaryAsync(c => c.Code, c => c.Id, ct);
-        var edgeTypeIds = await _db.GraphEdgeTypes.ToDictionaryAsync(e => e.Code, e => e.Id, ct);
+        var componentTypeIds = componentTypeCodesById.ToDictionary(pair => pair.Value, pair => pair.Key, StringComparer.OrdinalIgnoreCase);
+        var edgeTypeIds = edgeTypeCodesById.ToDictionary(pair => pair.Value, pair => pair.Key, StringComparer.OrdinalIgnoreCase);
 
         var nodeIdByKey = new Dictionary<string, Guid>();
         var codeFileIdByPath = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
@@ -182,22 +274,7 @@ public class IngestionService
             {
                 if (!codeFileIdByPath.TryGetValue(parsed.RelativeFilePath, out var existingId))
                 {
-                    var codeFile = await _db.CodeFiles.FirstOrDefaultAsync(
-                        f => f.RepositoryId == repository.RepositoryId && f.RelativePath == parsed.RelativeFilePath, ct);
-                    if (codeFile is null)
-                    {
-                        codeFile = new CodeFile
-                        {
-                            CodeFileId = Guid.NewGuid(),
-                            RepositoryId = repository.RepositoryId,
-                            RelativePath = parsed.RelativeFilePath,
-                            FileExtension = Path.GetExtension(parsed.RelativeFilePath),
-                            CreatedAtUtc = DateTime.UtcNow,
-                            UpdatedAtUtc = DateTime.UtcNow,
-                        };
-                        _db.CodeFiles.Add(codeFile);
-                    }
-                    existingId = codeFile.CodeFileId;
+                    existingId = codeFilesByPath[parsed.RelativeFilePath].CodeFileId;
                     codeFileIdByPath[parsed.RelativeFilePath] = existingId;
                 }
                 codeFileId = existingId;
@@ -257,6 +334,8 @@ public class IngestionService
         run.FilesFailed = failedCount;
 
         await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("Completed ingestion {IngestionRunId}: {FilesParsed} parsed, {FilesFailed} failed, {NodesCreated} nodes, {EdgesCreated} edges", run.IngestionRunId, parsedCount, failedCount, allNodes.Count, edgeCreated);
 
         return new IngestResponse(run.IngestionRunId, files.Count, parsedCount, failedCount, allNodes.Count, edgeCreated, errors);
     }

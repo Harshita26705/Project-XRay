@@ -35,7 +35,14 @@ public record AnalysisNodeResultResponse(
     int? Distance,
     decimal? MinPathConfidence,
     string? RuleCode,
-    bool IsDirectlyChanged);
+    bool IsDirectlyChanged,
+    string? Recommendation = null);
+
+public record AnalysisImpactEdgeResponse(
+    Guid SourceNodeId,
+    Guid TargetNodeId,
+    string EdgeType,
+    decimal Confidence);
 
 public record AnalysisResponse(
     Guid AnalysisId,
@@ -50,9 +57,10 @@ public record AnalysisResponse(
     int UnknownCount,
     DateTime CreatedAtUtc,
     DateTime? CompletedAtUtc,
+    IReadOnlyList<AnalysisImpactEdgeResponse> Edges,
     IReadOnlyList<AnalysisNodeResultResponse> Nodes);
 
-public record AnalysisProgressResponse(string StageCode, string StatusCode, decimal PercentComplete, int? ComponentsTraced, int? EstimatedChains);
+public record AnalysisProgressResponse(string StatusCode);
 
 public record EvidenceResponse(
     Guid EvidenceId,

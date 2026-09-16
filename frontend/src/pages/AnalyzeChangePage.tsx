@@ -13,7 +13,7 @@ const TABS: { key: ChangeType; label: string }[] = [
 ];
 
 export default function AnalyzeChangePage() {
-  const { currentProject } = useProjects();
+  const { currentProject, currentBranch } = useProjects();
   const navigate = useNavigate();
   const [tab, setTab] = useState<ChangeType>('WORK_ITEM');
   const [externalId, setExternalId] = useState('9214');
@@ -45,8 +45,8 @@ export default function AnalyzeChangePage() {
         changedFilePaths
       });
 
-      const analysis = await api.createAnalysis(change.changeId, scope);
-      navigate(`/analyses/${analysis.analysisId}`);
+      const analysis = await api.createAnalysis(change.changeId, scope, currentBranch?.name);
+      navigate(`/analyses/${analysis.analysisId}/progress`);
     } finally {
       setBusy(false);
     }
@@ -121,7 +121,7 @@ export default function AnalyzeChangePage() {
             <p className="text-[11px] text-text-muted">TARGET PROJECT</p>
             <p className="text-sm font-medium">{currentProject?.name ?? 'No project selected'} (Azure DevOps)</p>
             <p className="mt-2 text-[11px] text-text-muted">WORKING BRANCH</p>
-            <p className="text-sm text-primary">main</p>
+            <p className="text-sm text-primary">{currentBranch?.name ?? 'No branch selected'}</p>
           </Card>
 
           <Card className="p-4">

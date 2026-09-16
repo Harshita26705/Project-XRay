@@ -1,5 +1,7 @@
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
+using XRay.Domain.Analysis;
+using XRay.Domain.Reference;
 using XRay.Domain.Security;
 using XRay.Infrastructure.Persistence;
 
@@ -86,6 +88,135 @@ public class SecurityScanService
         scan.FindingCount = findingCount;
         await _db.SaveChangesAsync(ct);
         return scan.SecurityScanId;
+    }
+
+    public async Task<SecurityScan> RunProjectScanAsync(Guid projectId, string repositoryRootPath, CancellationToken ct = default)
+    {
+        var project = await _db.Projects.FirstOrDefaultAsync(p => p.ProjectId == projectId, ct)
+            ?? throw new InvalidOperationException("Project not found.");
+
+        var completedStatusId = await _db.AnalysisStatuses.Where(s => s.Code == "COMPLETED").Select(s => s.Id).FirstOrDefaultAsync(ct);
+        if (completedStatusId == 0)
+        {
+            var completedStatus = new AnalysisStatus
+            {
+                Id = 1,
+                Code = "COMPLETED",
+                DisplayName = "Completed"
+            };
+            if (await _db.AnalysisStatuses.AnyAsync(s => s.Code == completedStatus.Code, ct) == false)
+            {
+                _db.AnalysisStatuses.Add(completedStatus);
+                await _db.SaveChangesAsync(ct);
+            }
+            completedStatusId = await _db.AnalysisStatuses.Where(s => s.Code == "COMPLETED").Select(s => s.Id).FirstAsync(ct);
+        }
+
+        var analysis = new Analysis
+        {
+            AnalysisId = Guid.NewGuid(),
+            OrganizationId = project.OrganizationId,
+            ProjectId = project.ProjectId,
+            AnalysisStatusId = completedStatusId,
+            IsDeterministicComplete = true,
+            IsEvidenceComplete = true,
+            RequestedByUserId = project.CreatedByUserId,
+            StartedAtUtc = DateTime.UtcNow,
+            CompletedAtUtc = DateTime.UtcNow,
+            CreatedAtUtc = DateTime.UtcNow,
+        };
+        _db.Analyses.Add(analysis);
+        await _db.SaveChangesAsync(ct);
+
+        var filesToScan = new List<(Guid? GraphNodeId, string? FilePath, string Content)>();
+        foreach (var file in Directory.EnumerateFiles(repositoryRootPath, "*.*", SearchOption.AllDirectories).Where(file =>
+                     file.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ||
+                     file.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) ||
+                     file.EndsWith(".tsx", StringComparison.OrdinalIgnoreCase) ||
+                     file.EndsWith(".js", StringComparison.OrdinalIgnoreCase) ||
+                     file.EndsWith(".sql", StringComparison.OrdinalIgnoreCase) ||
+                     file.EndsWith(".json", StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                var content = await File.ReadAllTextAsync(file, ct);
+                filesToScan.Add((null, Path.GetRelativePath(repositoryRootPath, file).Replace('\\', '/'), content));
+            }
+            catch (IOException) { }
+        }
+
+        var scanner = await _db.SecurityScanners.FirstOrDefaultAsync(s => s.Code == "XRAY_REGEX_SAST", ct);
+        if (scanner is null)
+        {
+            scanner = new SecurityScanner { SecurityScannerId = Guid.NewGuid(), OrganizationId = project.OrganizationId, Name = "X-Ray Structural SAST", Code = "XRAY_REGEX_SAST" };
+            _db.SecurityScanners.Add(scanner);
+        }
+
+        var severityIds = await EnsureSeverityMapAsync(ct);
+        var scan = new SecurityScan
+        {
+            SecurityScanId = Guid.NewGuid(),
+            AnalysisId = analysis.AnalysisId,
+            SecurityScannerId = scanner.SecurityScannerId,
+            StatusCode = "COMPLETED",
+            StartedAtUtc = DateTime.UtcNow,
+            CompletedAtUtc = DateTime.UtcNow,
+        };
+        _db.SecurityScans.Add(scan);
+
+        var findingCount = 0;
+        foreach (var (graphNodeId, filePath, content) in filesToScan)
+        {
+            foreach (var rule in Rules)
+            {
+                var match = rule.Pattern.Match(content);
+                if (!match.Success) continue;
+
+                var ruleEntity = await GetOrCreateRuleAsync(scanner.SecurityScannerId, rule.Code, rule.Name, severityIds[rule.Severity], ct);
+                var lineNo = content[..match.Index].Count(c => c == '\n') + 1;
+                _db.SecurityFindings.Add(new SecurityFinding
+                {
+                    SecurityFindingId = Guid.NewGuid(),
+                    SecurityScanId = scan.SecurityScanId,
+                    SecurityRuleId = ruleEntity.SecurityRuleId,
+                    GraphNodeId = graphNodeId,
+                    CodeFileId = null,
+                    Title = rule.Name,
+                    Description = $"Pattern '{rule.Code}' matched in {filePath ?? "unknown file"} at line {lineNo}.",
+                    SourceLineStart = lineNo,
+                    SourceLineEnd = lineNo,
+                    Remediation = RemediationFor(rule.Code),
+                    StatusCode = "OPEN",
+                    CreatedAtUtc = DateTime.UtcNow,
+                });
+                findingCount++;
+            }
+        }
+
+        scan.FindingCount = findingCount;
+        await _db.SaveChangesAsync(ct);
+        return scan;
+    }
+
+    private async Task<Dictionary<string, byte>> EnsureSeverityMapAsync(CancellationToken ct)
+    {
+        var required = new[]
+        {
+            new SecuritySeverity { Id = 1, Code = "CRITICAL", DisplayName = "Critical", SortOrder = 1 },
+            new SecuritySeverity { Id = 2, Code = "HIGH", DisplayName = "High", SortOrder = 2 },
+            new SecuritySeverity { Id = 3, Code = "MEDIUM", DisplayName = "Medium", SortOrder = 3 },
+            new SecuritySeverity { Id = 4, Code = "LOW", DisplayName = "Low", SortOrder = 4 },
+        };
+
+        var existing = await _db.SecuritySeverities.ToListAsync(ct);
+        foreach (var item in required)
+        {
+            if (existing.Any(s => s.Code == item.Code)) continue;
+            _db.SecuritySeverities.Add(item);
+        }
+
+        await _db.SaveChangesAsync(ct);
+        return await _db.SecuritySeverities.ToDictionaryAsync(s => s.Code, s => s.Id, ct);
     }
 
     private async Task<SecurityRule> GetOrCreateRuleAsync(Guid scannerId, string code, string name, byte severityId, CancellationToken ct)

@@ -8,9 +8,8 @@ namespace XRay.Api.Services;
 /// <summary>
 /// AI is strictly explanatory: every generated sentence is built only from Evidence and
 /// AnalysisNodeResult rows already produced by the deterministic engine — it never introduces new
-/// nodes, edges, risk states, or findings. When no real Foundry/Azure OpenAI configuration is
-/// present, falls back to a deterministic template and marks the generation as Degraded, matching
-/// the product's "AI unavailable" honest-degradation rule rather than silently pretending success.
+/// nodes, edges, risk states, or findings. When Gemini is not configured or unavailable, this
+/// service falls back to a deterministic template and marks the generation as Degraded.
 /// </summary>
 public class AiExplanationService
 {
@@ -23,6 +22,46 @@ public class AiExplanationService
         _db = db;
         _configuration = configuration;
         _httpClientFactory = httpClientFactory;
+    }
+
+    public async Task<AIProvider> GetOrCreateProviderAsync(string providerCode, CancellationToken ct = default)
+    {
+        var normalized = string.IsNullOrWhiteSpace(providerCode) ? "GOOGLE_GEMINI" : providerCode.Trim();
+        var provider = await _db.AIProviders.FirstOrDefaultAsync(p => p.Code == normalized, ct);
+        if (provider is not null) return provider;
+
+        provider = new AIProvider
+        {
+            AIProviderId = Guid.NewGuid(),
+            Code = normalized,
+            DisplayName = normalized switch
+            {
+                "GOOGLE_GEMINI" => "Google Gemini",
+                "MOCK" => "Deterministic Fallback",
+                _ => normalized
+            }
+        };
+
+        _db.AIProviders.Add(provider);
+        await _db.SaveChangesAsync(ct);
+        return provider;
+    }
+
+    public async Task<AIConfiguration?> GetConfigurationAsync(CancellationToken ct = default)
+    {
+        return await _db.AIConfigurations.OrderByDescending(c => c.UpdatedAtUtc).FirstOrDefaultAsync(ct);
+    }
+
+    public async Task SaveConfiguration(AIConfiguration config, CancellationToken ct = default)
+    {
+        _db.AIConfigurations.Add(config);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    public async Task UpdateConfiguration(AIConfiguration config, CancellationToken ct = default)
+    {
+        _db.AIConfigurations.Update(config);
+        await _db.SaveChangesAsync(ct);
     }
 
     public async Task<ExplainResponse> ExplainAsync(Guid analysisId, ExplainRequest request, CancellationToken ct = default)
@@ -39,26 +78,27 @@ public class AiExplanationService
             .Select(n => graphNodes.GetValueOrDefault(n.GraphNodeId)?.DisplayName ?? "component").Distinct().Take(5).ToList();
         var risky = nodeResults.Count(n => riskStates.GetValueOrDefault(n.RiskStateId) == "RISKY");
 
-        var endpoint = _configuration["AzureOpenAI:Endpoint"];
-        var apiKey = _configuration["AzureOpenAI:ApiKey"];
-        var degraded = string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(apiKey);
+        var endpoint = _configuration["Gemini:Endpoint"] ?? "https://generativelanguage.googleapis.com/v1beta";
+        var apiKey = _configuration["Gemini:ApiKey"];
+        var model = _configuration["Gemini:Model"] ?? "gemini-2.5-flash";
+        var degraded = IsPlaceholder(apiKey);
 
         string summary;
         if (!degraded)
         {
-            // A real Foundry/Azure OpenAI endpoint is configured — call it, but still only feed it the
-            // verified facts above (no live network calls without a configured deployment).
-            summary = await CallFoundryAsync(endpoint!, apiKey!, critical, risky, ct) ?? BuildDeterministicSummary(critical, risky);
+            summary = await CallGeminiAsync(endpoint, apiKey!, model, critical, risky, request.Focus, ct)
+                      ?? BuildDeterministicSummary(critical, risky);
         }
         else
         {
             summary = BuildDeterministicSummary(critical, risky);
         }
 
-        var provider = await _db.AIProviders.FirstOrDefaultAsync(p => p.Code == (degraded ? "MOCK" : "MICROSOFT_FOUNDRY"), ct);
+        var providerCode = degraded ? "MOCK" : "GOOGLE_GEMINI";
+        var provider = await _db.AIProviders.FirstOrDefaultAsync(p => p.Code == providerCode, ct);
         if (provider is null)
         {
-            provider = new AIProvider { AIProviderId = Guid.NewGuid(), Code = degraded ? "MOCK" : "MICROSOFT_FOUNDRY", DisplayName = degraded ? "Deterministic Fallback" : "Microsoft Foundry" };
+            provider = new AIProvider { AIProviderId = Guid.NewGuid(), Code = providerCode, DisplayName = degraded ? "Deterministic Fallback" : "Google Gemini" };
             _db.AIProviders.Add(provider);
         }
 
@@ -116,25 +156,41 @@ public class AiExplanationService
         return criticalPart + riskyPart;
     }
 
-    private async Task<string?> CallFoundryAsync(string endpoint, string apiKey, List<string> critical, int riskyCount, CancellationToken ct)
+    private async Task<string?> CallGeminiAsync(string endpoint, string apiKey, string model, List<string> critical, int riskyCount, string? focus, CancellationToken ct)
     {
         try
         {
             var client = _httpClientFactory.CreateClient();
             client.Timeout = TimeSpan.FromSeconds(10);
-            client.DefaultRequestHeaders.Add("api-key", apiKey);
-            var prompt = $"Explain in two sentences why these components are at risk: {string.Join(", ", critical)}. {riskyCount} components carry transitive risk.";
-            var payload = new { messages = new[] { new { role = "user", content = prompt } }, max_tokens = 200 };
-            var response = await client.PostAsJsonAsync(endpoint, payload, ct);
+            var prompt = $"You are explaining a deterministic software change-impact analysis. Use only these verified facts. " +
+                         $"Directly affected components: {string.Join(", ", critical.DefaultIfEmpty("none"))}. " +
+                         $"Transitive risky components: {riskyCount}. " +
+                         (string.IsNullOrWhiteSpace(focus) ? "" : $"Requested focus: {focus}. ") +
+                         "Respond in two concise sentences. Do not invent components, dependencies, vulnerabilities, or risk states.";
+            var payload = new
+            {
+                systemInstruction = new { parts = new[] { new { text = "You are a precise, evidence-bound software analysis assistant." } } },
+                contents = new[] { new { role = "user", parts = new[] { new { text = prompt } } } },
+                generationConfig = new
+                {
+                    temperature = _configuration.GetValue("Gemini:Temperature", 0.2),
+                    maxOutputTokens = _configuration.GetValue("Gemini:MaxOutputTokens", 200)
+                }
+            };
+            var url = $"{endpoint.TrimEnd('/')}/models/{Uri.EscapeDataString(model)}:generateContent?key={Uri.EscapeDataString(apiKey)}";
+            using var response = await client.PostAsJsonAsync(url, payload, ct);
             if (!response.IsSuccessStatusCode) return null;
             var json = await response.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>(cancellationToken: ct);
-            return json.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0
-                ? choices[0].GetProperty("message").GetProperty("content").GetString()
-                : null;
+            if (!json.TryGetProperty("candidates", out var candidates) || candidates.GetArrayLength() == 0) return null;
+            var parts = candidates[0].GetProperty("content").GetProperty("parts");
+            return parts.GetArrayLength() == 0 ? null : parts[0].GetProperty("text").GetString();
         }
         catch
         {
             return null; // Falls back to the deterministic summary — never silently fail the request.
         }
     }
+
+    private static bool IsPlaceholder(string? value) =>
+        string.IsNullOrWhiteSpace(value) || value.StartsWith("REPLACE-WITH-YOUR-", StringComparison.OrdinalIgnoreCase);
 }

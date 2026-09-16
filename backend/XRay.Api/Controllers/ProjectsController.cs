@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using XRay.Api.Contracts;
 using XRay.Api.Services;
@@ -68,6 +69,8 @@ public class ProjectsController : ControllerBase
     }
 
     [HttpPost("{projectId:guid}/ingest")]
+    [EnableRateLimiting("expensive")]
+    [RequestSizeLimit(64 * 1024)]
     public async Task<ActionResult<IngestResponse>> Ingest(Guid projectId, IngestRequest request, CancellationToken ct)
     {
         try
@@ -80,6 +83,33 @@ public class ProjectsController : ControllerBase
         }
     }
 
+    [HttpPut("{projectId:guid}")]
+    public async Task<ActionResult<ProjectResponse>> Update(Guid projectId, UpdateProjectRequest request, CancellationToken ct)
+    {
+        try
+        {
+            return Ok(await _projects.UpdateAsync(projectId, request, ct));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
+    [HttpDelete("{projectId:guid}")]
+    public async Task<ActionResult> Delete(Guid projectId, CancellationToken ct)
+    {
+        try
+        {
+            await _projects.DeleteAsync(projectId, ct);
+            return NoContent();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
     [HttpGet("{projectId:guid}/graph")]
     public async Task<ActionResult<GraphResponse>> GetGraph(Guid projectId, [FromQuery] string? branch, CancellationToken ct)
     {
@@ -87,8 +117,7 @@ public class ProjectsController : ControllerBase
         snapshotQuery = branch is null
             ? snapshotQuery.Where(s => s.Branch!.IsDefault || s.BranchId == null)
             : snapshotQuery.Where(s => s.Branch!.Name == branch);
-        var snapshot = await snapshotQuery.FirstOrDefaultAsync(ct)
-                       ?? await _db.GraphSnapshots.Where(s => s.ProjectId == projectId && s.IsCurrent).FirstOrDefaultAsync(ct);
+        var snapshot = await snapshotQuery.FirstOrDefaultAsync(ct);
         if (snapshot is null) return Ok(new GraphResponse(null, Array.Empty<GraphNodeResponse>(), Array.Empty<GraphEdgeResponse>()));
 
         var componentTypes = await _db.ComponentTypes.ToDictionaryAsync(c => c.Id, c => c.Code, ct);
@@ -108,6 +137,84 @@ public class ProjectsController : ControllerBase
             e.GraphEdgeId, e.SourceNodeId, e.TargetNodeId, edgeTypes.GetValueOrDefault(e.GraphEdgeTypeId, "USES"), e.Confidence, e.IsRuntimeResolved)).ToList();
 
         return Ok(new GraphResponse(snapshot.GraphSnapshotId, nodeResponses, edgeResponses));
+    }
+
+    [HttpGet("{projectId:guid}/graph/nodes/{nodeId:guid}")]
+    public async Task<ActionResult<ProjectNodeDetailResponse>> GetNodeDetail(Guid projectId, Guid nodeId, CancellationToken ct)
+    {
+        var snapshot = await _db.GraphSnapshots
+            .Where(s => s.ProjectId == projectId && s.IsCurrent)
+            .FirstOrDefaultAsync(ct);
+        if (snapshot is null)
+        {
+            return NotFound(new { error = "No current graph snapshot found for this project." });
+        }
+
+        var node = await _db.GraphNodes.FirstOrDefaultAsync(n => n.GraphNodeId == nodeId && n.GraphSnapshotId == snapshot.GraphSnapshotId, ct);
+        if (node is null) return NotFound();
+
+        var componentType = await _db.ComponentTypes.Where(c => c.Id == node.ComponentTypeId).Select(c => c.Code).FirstOrDefaultAsync(ct);
+        var codeFile = node.CodeFileId is null ? null : await _db.CodeFiles.FirstOrDefaultAsync(f => f.CodeFileId == node.CodeFileId, ct);
+        var incoming = await _db.GraphEdges
+            .Where(e => e.TargetNodeId == nodeId && e.GraphSnapshotId == snapshot.GraphSnapshotId)
+            .Select(e => new { e.SourceNodeId, e.GraphEdgeTypeId, e.Confidence })
+            .ToListAsync(ct);
+        var outgoing = await _db.GraphEdges
+            .Where(e => e.SourceNodeId == nodeId && e.GraphSnapshotId == snapshot.GraphSnapshotId)
+            .Select(e => new { e.TargetNodeId, e.GraphEdgeTypeId, e.Confidence })
+            .ToListAsync(ct);
+
+        var edgeTypeNames = await _db.GraphEdgeTypes.ToDictionaryAsync(e => e.Id, e => e.Code, ct);
+        var neighborNames = await _db.GraphNodes.Where(n => incoming.Select(i => i.SourceNodeId).Concat(outgoing.Select(o => o.TargetNodeId)).Contains(n.GraphNodeId)).ToDictionaryAsync(n => n.GraphNodeId, n => n.DisplayName, ct);
+
+        var contains = new List<string>();
+        if (codeFile is not null) contains.Add(codeFile.RelativePath);
+        if (node.DisplayName is not null && node.DisplayName.Contains('.')) contains.Add(node.DisplayName);
+
+        var incomingDetails = incoming.Select(i => new NodeConnectionDetail(i.SourceNodeId, neighborNames.GetValueOrDefault(i.SourceNodeId, "Unknown"), edgeTypeNames.GetValueOrDefault(i.GraphEdgeTypeId, "USES"), i.Confidence, "incoming")).ToList();
+        var outgoingDetails = outgoing.Select(o => new NodeConnectionDetail(o.TargetNodeId, neighborNames.GetValueOrDefault(o.TargetNodeId, "Unknown"), edgeTypeNames.GetValueOrDefault(o.GraphEdgeTypeId, "USES"), o.Confidence, "outgoing")).ToList();
+
+        return Ok(new ProjectNodeDetailResponse(
+            node.GraphNodeId,
+            node.ExternalKey,
+            componentType ?? "UNKNOWN",
+            node.DisplayName ?? "Unknown",
+            codeFile?.RelativePath,
+            node.IsParsed,
+            contains,
+            incomingDetails,
+            outgoingDetails,
+            null));
+    }
+
+    [HttpPost("{projectId:guid}/security-scans")]
+    public async Task<ActionResult<ProjectSecurityScanResponse>> RunProjectSecurityScan(Guid projectId, CancellationToken ct)
+    {
+        var project = await _projects.GetAsync(projectId, ct);
+        if (project is null) return NotFound();
+
+        var repository = await _db.Repositories.FirstOrDefaultAsync(r => r.ProjectId == projectId, ct);
+        if (repository?.CloneUrl is null || !repository.CloneUrl.StartsWith("file:///", StringComparison.OrdinalIgnoreCase))
+        {
+            return BadRequest(new { error = "This project is not backed by a local file repository for a project-wide scan." });
+        }
+
+        var root = repository.CloneUrl["file:///".Length..].Replace('/', Path.DirectorySeparatorChar);
+        var scan = await _db.SecurityScanners.FirstOrDefaultAsync(s => s.Code == "XRAY_REGEX_SAST", ct);
+        if (scan is null)
+        {
+            scan = new XRay.Domain.Security.SecurityScanner { SecurityScannerId = Guid.NewGuid(), OrganizationId = await _db.Projects.Where(p => p.ProjectId == projectId).Select(p => p.OrganizationId).FirstAsync(ct), Name = "X-Ray Structural SAST", Code = "XRAY_REGEX_SAST" };
+            _db.SecurityScanners.Add(scan);
+            await _db.SaveChangesAsync(ct);
+        }
+
+        var result = await _db.SecurityScans.Include(s => s.Analysis).OrderByDescending(s => s.StartedAtUtc).FirstOrDefaultAsync(s => s.Analysis != null && s.Analysis.ProjectId == projectId, ct);
+        if (result is null)
+        {
+            result = await _projects.CreateProjectSecurityScanAsync(projectId, root, ct);
+        }
+
+        return Ok(new ProjectSecurityScanResponse(result.SecurityScanId, projectId, result.FindingCount, result.StatusCode, result.StartedAtUtc ?? DateTime.UtcNow, result.CompletedAtUtc));
     }
 
     [HttpGet("overview")]

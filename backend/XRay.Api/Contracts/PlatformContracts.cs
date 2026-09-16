@@ -13,6 +13,8 @@ public record CreateIntegrationRequest(string Provider, string DisplayName, stri
 
 public record AiConfigurationResponse(string Provider, string DeploymentStatus, string? ActiveModel, string KnowledgeLayer);
 
+public record UpdateAiConfigurationRequest(string Provider, string? ActiveModel, decimal? Temperature, int? MaxTokens, string? SystemPromptOverride);
+
 public record NotificationChannelResponse(Guid NotificationChannelId, string ChannelType, string DisplayName, bool IsEnabled);
 
 public record NotificationRuleResponse(Guid NotificationRuleId, string EventType, Guid ChannelId, string ChannelType, bool IsEnabled);
