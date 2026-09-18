@@ -26,6 +26,8 @@ public class IntegrationConnection
     public string? ExternalBaseUrl { get; set; }
     public Guid? SecretReferenceId { get; set; }
     public SecretReference? SecretReference { get; set; }
+    /// <summary>Provider credential (e.g. Azure DevOps PAT), stored per-organization so calls can authenticate independently of the caller's own sign-in token.</summary>
+    public string? PersonalAccessToken { get; set; }
     public string StatusCode { get; set; } = default!;
     public DateTime? LastTestedAtUtc { get; set; }
     public string? LastError { get; set; }

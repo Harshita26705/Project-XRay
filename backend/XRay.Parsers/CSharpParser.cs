@@ -81,6 +81,8 @@ public class CSharpParser
             if (componentType == ComponentTypeCodes.Controller)
             {
                 var classRoute = GetAttributeArgument(typeDecl.AttributeLists, "Route");
+                var controllerName = typeName.EndsWith("Controller", StringComparison.Ordinal)
+                    ? typeName[..^"Controller".Length] : typeName;
                 foreach (var method in typeDecl.Members.OfType<MethodDeclarationSyntax>())
                 {
                     var httpVerb = GetHttpVerb(method.AttributeLists);
@@ -88,7 +90,7 @@ public class CSharpParser
                     var (verb, attributeName) = httpVerb.Value;
 
                     var methodRoute = GetAttributeArgument(method.AttributeLists, attributeName) ?? "";
-                    var fullPath = CombineRoute(classRoute, methodRoute);
+                    var fullPath = CombineRoute(classRoute, methodRoute, controllerName, method.Identifier.Text);
                     var apiKey = $"API:{verb} {fullPath}";
                     var apiLine = method.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
 
@@ -125,8 +127,7 @@ public class CSharpParser
                 var memberName = access.Name.Identifier.Text;
                 // crude heuristic: `_context.Payments` / `dbContext.Orders` style access
                 if (access.Expression is IdentifierNameSyntax { Identifier.Text: var recv } &&
-                    (recv.Contains("context", StringComparison.OrdinalIgnoreCase) ||
-                     recv.Contains("db", StringComparison.OrdinalIgnoreCase)))
+                    LooksLikeDbContextReceiver(recv))
                 {
                     var tableKey = $"TABLE:{memberName}";
                     var isWrite = access.Parent?.ToString().Contains("Add", StringComparison.OrdinalIgnoreCase) == true
@@ -147,7 +148,30 @@ public class CSharpParser
     private static string BuildClassKey(TypeDeclarationSyntax typeDecl, string typeName)
     {
         var ns = GetNamespaceName(typeDecl);
-        return string.IsNullOrEmpty(ns) ? $"CLASS:{typeName}" : $"CLASS:{ns}.{typeName}";
+        var enclosingPath = GetEnclosingTypeChain(typeDecl);
+        var qualifiedName = string.IsNullOrEmpty(enclosingPath) ? typeName : $"{enclosingPath}.{typeName}";
+        return string.IsNullOrEmpty(ns) ? $"CLASS:{qualifiedName}" : $"CLASS:{ns}.{qualifiedName}";
+    }
+
+    /// <summary>Dot-joined names of enclosing types, outermost first, so nested classes don't collide with top-level classes of the same name.</summary>
+    private static string GetEnclosingTypeChain(TypeDeclarationSyntax typeDecl)
+    {
+        var names = new List<string>();
+        for (var parent = typeDecl.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is TypeDeclarationSyntax enclosingType)
+            {
+                names.Add(enclosingType.Identifier.Text);
+            }
+        }
+        names.Reverse();
+        return string.Join(".", names);
+    }
+
+    private static bool LooksLikeDbContextReceiver(string receiver)
+    {
+        var normalized = receiver.TrimStart('_').ToLowerInvariant();
+        return normalized is "db" or "context" or "dbcontext" || normalized.EndsWith("dbcontext", StringComparison.Ordinal);
     }
 
     private static string ResolveTypeKey(TypeDeclarationSyntax typeDecl, string rawType)
@@ -179,7 +203,11 @@ public class CSharpParser
     }
 
     private static bool IsDbContext(TypeDeclarationSyntax typeDecl) =>
-        typeDecl.BaseList?.Types.Any(t => t.Type.ToString().Contains("DbContext")) == true;
+        typeDecl.BaseList?.Types.Any(t =>
+        {
+            var baseName = t.Type.ToString().Split('<')[0].Trim();
+            return baseName.Equals("DbContext", StringComparison.Ordinal) || baseName.EndsWith("DbContext", StringComparison.Ordinal);
+        }) == true;
 
     private static bool IsPrimitiveOrFramework(string typeName)
     {
@@ -241,10 +269,13 @@ public class CSharpParser
         return null;
     }
 
-    private static string CombineRoute(string? classRoute, string methodRoute)
+    private static string CombineRoute(string? classRoute, string methodRoute, string controllerName, string actionName)
     {
-        var basePath = (classRoute ?? "").Replace("[controller]", "", StringComparison.OrdinalIgnoreCase).TrimEnd('/');
-        var full = $"/{basePath}/{methodRoute}".Replace("//", "/");
+        var basePath = (classRoute ?? "")
+            .Replace("[controller]", controllerName, StringComparison.OrdinalIgnoreCase)
+            .TrimEnd('/');
+        var resolvedMethodRoute = methodRoute.Replace("[action]", actionName, StringComparison.OrdinalIgnoreCase);
+        var full = $"/{basePath}/{resolvedMethodRoute}".Replace("//", "/");
         return full.TrimEnd('/') == "" ? "/" : full;
     }
 }

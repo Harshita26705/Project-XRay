@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using XRay.Api.Contracts;
 using XRay.Api.Services;
+using XRay.Api.Services.BackgroundJobs;
 using XRay.Domain.Ai;
 using XRay.Domain.Analysis;
 using XRay.Domain.Changes;
@@ -133,7 +134,7 @@ public class Phase1BackendSurfaceTests
         db.AnalysisNodeResults.Add(new AnalysisNodeResult { AnalysisNodeResultId = Guid.NewGuid(), AnalysisId = analysisId, GraphNodeId = targetId, RiskStateId = 2, Distance = 1, MinPathConfidence = 0.98m, RuleCode = "R5", IsDirectlyChanged = false, CreatedAtUtc = DateTime.UtcNow });
         await db.SaveChangesAsync();
 
-        var service = new AnalysisService(db, new SecurityScanService(db), NullLogger<AnalysisService>.Instance);
+        var service = new AnalysisService(db, new SecurityScanService(db), new BackgroundTaskQueue(), NullLogger<AnalysisService>.Instance);
         var response = await service.GetImpactGraphAsync(analysisId, CancellationToken.None);
 
         Assert.NotEmpty(response);
@@ -178,7 +179,7 @@ public class Phase1BackendSurfaceTests
         db.AnalysisNodeResults.Add(new AnalysisNodeResult { AnalysisNodeResultId = Guid.NewGuid(), AnalysisId = analysisId, GraphNodeId = targetId, RiskStateId = 2, Distance = 1, MinPathConfidence = 0.98m, RuleCode = "R5", IsDirectlyChanged = false, CreatedAtUtc = DateTime.UtcNow });
         await db.SaveChangesAsync();
 
-        var service = new AnalysisService(db, new SecurityScanService(db), NullLogger<AnalysisService>.Instance);
+        var service = new AnalysisService(db, new SecurityScanService(db), new BackgroundTaskQueue(), NullLogger<AnalysisService>.Instance);
         var response = await service.GetAsync(analysisId, CancellationToken.None);
 
         Assert.NotNull(response);

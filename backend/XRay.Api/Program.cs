@@ -42,6 +42,13 @@ builder.Services.AddScoped<XRay.Api.Services.AzureDevOpsService>();
 builder.Services.AddScoped<XRay.Api.Services.AiExplanationService>();
 builder.Services.AddScoped<XRay.Api.Services.NotificationService>();
 builder.Services.AddScoped<XRay.Api.Services.SettingsService>();
+builder.Services.AddSingleton<XRay.Api.Services.BackgroundJobs.IBackgroundTaskQueue, XRay.Api.Services.BackgroundJobs.BackgroundTaskQueue>();
+builder.Services.AddHostedService<XRay.Api.Services.BackgroundJobs.AnalysisJobWorker>();
+
+// Defense-in-depth: config layering already prevents this outside Development, but fail fast
+// rather than silently ignore it if that ever changes.
+XRay.Api.Auth.DevAuthBypassGuard.EnsureNotEnabledOutsideDevelopment(
+    builder.Environment.IsDevelopment(), builder.Configuration.GetValue<bool>("UseDevAuthBypass"));
 
 var useDevAuthBypass = builder.Environment.IsDevelopment() && builder.Configuration.GetValue<bool>("UseDevAuthBypass");
 if (useDevAuthBypass)
@@ -69,6 +76,21 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+
+if (useDevAuthBypass)
+{
+    app.Logger.LogWarning(
+        "UseDevAuthBypass is enabled — every request is treated as an authenticated fixed local user. " +
+        "This is only permitted in Development and must never be set in Production configuration.");
+}
+
+if (!app.Environment.IsDevelopment() &&
+    (builder.Configuration.GetSection("Ingestion:AllowedLocalRepositoryRoots").Get<string[]>() ?? Array.Empty<string>()).Length == 0)
+{
+    app.Logger.LogWarning(
+        "Ingestion:AllowedLocalRepositoryRoots is empty — any authenticated user can point project ingestion at " +
+        "an arbitrary local filesystem path on this server. Configure an allow-list before exposing this outside local development.");
+}
 
 if (app.Environment.IsDevelopment())
 {

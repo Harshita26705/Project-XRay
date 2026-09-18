@@ -1,8 +1,10 @@
 using Microsoft.EntityFrameworkCore;
 using XRay.Api.Contracts;
+using XRay.Api.Services.BackgroundJobs;
 using XRay.Domain.Analysis;
 using XRay.Domain.EvidenceModel;
 using XRay.Domain.Graph;
+using XRay.Domain.Jobs;
 using XRay.Infrastructure.Persistence;
 
 namespace XRay.Api.Services;
@@ -12,8 +14,9 @@ namespace XRay.Api.Services;
 /// and evidence paths come only from graph traversal + the R1-R12 rule table below (mirrors
 /// schema.md section 24 / the original Python classifier 1:1). AI never participates in this
 /// decision — see AiExplanationService for the strictly-explanatory layer.
-/// Runs synchronously in-request rather than via the Job/worker queue for now (see repo memory:
-/// "further work" — background job dispatch is a follow-up, not wired yet).
+/// The heavy classification work is dispatched to <see cref="AnalysisJobWorker"/> via
+/// <see cref="IBackgroundTaskQueue"/> and tracked as a Job row; CreateAndRunAsync itself only
+/// creates the QUEUED Analysis/Job rows and returns immediately.
 /// </summary>
 public class AnalysisService
 {
@@ -22,12 +25,14 @@ public class AnalysisService
 
     private readonly AppDbContext _db;
     private readonly SecurityScanService _security;
+    private readonly IBackgroundTaskQueue _jobQueue;
     private readonly ILogger<AnalysisService> _logger;
 
-    public AnalysisService(AppDbContext db, SecurityScanService security, ILogger<AnalysisService> logger)
+    public AnalysisService(AppDbContext db, SecurityScanService security, IBackgroundTaskQueue jobQueue, ILogger<AnalysisService> logger)
     {
         _db = db;
         _security = security;
+        _jobQueue = jobQueue;
         _logger = logger;
     }
 
@@ -44,7 +49,7 @@ public class AnalysisService
         var snapshot = await snapshotQuery.FirstOrDefaultAsync(ct)
                        ?? await _db.GraphSnapshots.Where(s => s.ProjectId == change.ProjectId && s.IsCurrent).FirstOrDefaultAsync(ct);
 
-        var queuedStatusId = await _db.AnalysisStatuses.Where(s => s.Code == "RUNNING").Select(s => s.Id).FirstAsync(ct);
+        var queuedStatusId = await _db.AnalysisStatuses.Where(s => s.Code == "QUEUED").Select(s => s.Id).FirstAsync(ct);
 
         var analysis = new Analysis
         {
@@ -85,11 +90,78 @@ public class AnalysisService
             return await ToResponseAsync(analysis, ct);
         }
 
-        await RunDeterministicEngineAsync(analysis, snapshot, change.ChangeId, scope.RunStaticSecurityAnalysis, ct);
+        var job = new Job
+        {
+            JobId = Guid.NewGuid(),
+            OrganizationId = organizationId,
+            ProjectId = change.ProjectId,
+            JobTypeCode = "ANALYSIS",
+            StatusCode = "QUEUED",
+            CorrelationId = analysis.AnalysisId,
+            QueuedAtUtc = DateTime.UtcNow,
+        };
+        _db.Jobs.Add(job);
+        await _db.SaveChangesAsync(ct);
 
-        _logger.LogInformation("Completed analysis {AnalysisId}", analysis.AnalysisId);
+        var graphSnapshotId = snapshot.GraphSnapshotId;
+        var changeId = change.ChangeId;
+        var runStaticSecurityAnalysis = scope.RunStaticSecurityAnalysis;
+        var analysisId = analysis.AnalysisId;
+        var jobId = job.JobId;
+
+        await _jobQueue.EnqueueAsync(async (scopedProvider, jobCt) =>
+        {
+            var scopedAnalysisService = scopedProvider.GetRequiredService<AnalysisService>();
+            await scopedAnalysisService.RunQueuedAnalysisAsync(analysisId, jobId, graphSnapshotId, changeId, runStaticSecurityAnalysis, jobCt);
+        });
+
+        _logger.LogInformation("Queued analysis {AnalysisId} for change {ChangeId}", analysis.AnalysisId, request.ChangeId);
 
         return await ToResponseAsync(analysis, ct);
+    }
+
+    /// <summary>Runs on a background-worker DI scope (see AnalysisJobWorker) — never call this with the DbContext from the enqueuing HTTP request.</summary>
+    public async Task RunQueuedAnalysisAsync(Guid analysisId, Guid jobId, Guid graphSnapshotId, Guid changeId, bool runStaticSecurityAnalysis, CancellationToken ct = default)
+    {
+        var analysis = await _db.Analyses.FirstAsync(a => a.AnalysisId == analysisId, ct);
+        var snapshot = await _db.GraphSnapshots.FirstAsync(s => s.GraphSnapshotId == graphSnapshotId, ct);
+        var job = await _db.Jobs.FirstOrDefaultAsync(j => j.JobId == jobId, ct);
+
+        analysis.AnalysisStatusId = await _db.AnalysisStatuses.Where(s => s.Code == "RUNNING").Select(s => s.Id).FirstAsync(ct);
+        if (job is not null)
+        {
+            job.StatusCode = "RUNNING";
+            job.StartedAtUtc = DateTime.UtcNow;
+            job.Attempts++;
+        }
+        await _db.SaveChangesAsync(ct);
+
+        try
+        {
+            await RunDeterministicEngineAsync(analysis, snapshot, changeId, runStaticSecurityAnalysis, ct);
+
+            if (job is not null)
+            {
+                job.StatusCode = "COMPLETED";
+                job.CompletedAtUtc = DateTime.UtcNow;
+                await _db.SaveChangesAsync(ct);
+            }
+
+            _logger.LogInformation("Completed analysis {AnalysisId}", analysisId);
+        }
+        catch (Exception ex)
+        {
+            analysis.AnalysisStatusId = await _db.AnalysisStatuses.Where(s => s.Code == "FAILED").Select(s => s.Id).FirstAsync(ct);
+            analysis.CompletedAtUtc = DateTime.UtcNow;
+            if (job is not null)
+            {
+                job.StatusCode = "FAILED";
+                job.CompletedAtUtc = DateTime.UtcNow;
+                job.ErrorMessage = ex.Message;
+            }
+            await _db.SaveChangesAsync(ct);
+            _logger.LogError(ex, "Analysis {AnalysisId} failed", analysisId);
+        }
     }
 
     private async Task RunDeterministicEngineAsync(Analysis analysis, GraphSnapshot snapshot, Guid changeId, bool runSecurity, CancellationToken ct)

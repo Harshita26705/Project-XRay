@@ -7,9 +7,10 @@ public record IntegrationConnectionResponse(
     string Status,
     DateTime? LastTestedAtUtc,
     bool IsEnabled,
-    string? ExternalBaseUrl);
+    string? ExternalBaseUrl,
+    bool HasPersonalAccessToken);
 
-public record CreateIntegrationRequest(string Provider, string DisplayName, string? ExternalBaseUrl, string? ExternalTenantId);
+public record CreateIntegrationRequest(string Provider, string DisplayName, string? ExternalBaseUrl, string? ExternalTenantId, string? PersonalAccessToken);
 
 public record AiConfigurationResponse(string Provider, string DeploymentStatus, string? ActiveModel, string KnowledgeLayer);
 

@@ -17,13 +17,15 @@ public class ProjectsController : ControllerBase
     private readonly IngestionService _ingestion;
     private readonly ICurrentUserService _currentUser;
     private readonly AppDbContext _db;
+    private readonly AiExplanationService _ai;
 
-    public ProjectsController(ProjectService projects, IngestionService ingestion, ICurrentUserService currentUser, AppDbContext db)
+    public ProjectsController(ProjectService projects, IngestionService ingestion, ICurrentUserService currentUser, AppDbContext db, AiExplanationService ai)
     {
         _projects = projects;
         _ingestion = ingestion;
         _currentUser = currentUser;
         _db = db;
+        _ai = ai;
     }
 
     [HttpGet]
@@ -187,6 +189,53 @@ public class ProjectsController : ControllerBase
             null));
     }
 
+    [HttpGet("{projectId:guid}/graph/nodes/{nodeId:guid}/explain")]
+    public async Task<ActionResult<NodeExplainResponse>> ExplainNode(Guid projectId, Guid nodeId, CancellationToken ct)
+    {
+        var detail = await GetNodeDetail(projectId, nodeId, ct);
+        if (detail.Result is not OkObjectResult { Value: ProjectNodeDetailResponse node }) return detail.Result!;
+
+        var fileContent = await TryReadNodeFileContentAsync(projectId, node.FilePath, ct);
+
+        var response = await _ai.ExplainNodeAsync(
+            node.DisplayName,
+            node.ComponentType,
+            node.FilePath,
+            fileContent,
+            node.Contains,
+            node.Outgoing.Select(o => o.NeighborName).Distinct().ToList(),
+            node.Incoming.Select(i => i.NeighborName).Distinct().ToList(),
+            ct);
+        return Ok(response);
+    }
+
+    /// <summary>Best-effort read of the node's source file, confined to the project's repository root.</summary>
+    private async Task<string?> TryReadNodeFileContentAsync(Guid projectId, string? relativeFilePath, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(relativeFilePath)) return null;
+
+        var repository = await _db.Repositories.FirstOrDefaultAsync(r => r.ProjectId == projectId, ct);
+        if (repository?.CloneUrl is null || !repository.CloneUrl.StartsWith("file:///", StringComparison.OrdinalIgnoreCase)) return null;
+
+        var root = repository.CloneUrl["file:///".Length..].Replace('/', Path.DirectorySeparatorChar);
+        var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var fullPath = Path.GetFullPath(Path.Combine(fullRoot, relativeFilePath.Replace('/', Path.DirectorySeparatorChar)));
+        if (!fullPath.Equals(fullRoot, StringComparison.OrdinalIgnoreCase) &&
+            !fullPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        try
+        {
+            return System.IO.File.Exists(fullPath) ? await System.IO.File.ReadAllTextAsync(fullPath, ct) : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
     [HttpPost("{projectId:guid}/security-scans")]
     public async Task<ActionResult<ProjectSecurityScanResponse>> RunProjectSecurityScan(Guid projectId, CancellationToken ct)
     {
@@ -200,19 +249,10 @@ public class ProjectsController : ControllerBase
         }
 
         var root = repository.CloneUrl["file:///".Length..].Replace('/', Path.DirectorySeparatorChar);
-        var scan = await _db.SecurityScanners.FirstOrDefaultAsync(s => s.Code == "XRAY_REGEX_SAST", ct);
-        if (scan is null)
-        {
-            scan = new XRay.Domain.Security.SecurityScanner { SecurityScannerId = Guid.NewGuid(), OrganizationId = await _db.Projects.Where(p => p.ProjectId == projectId).Select(p => p.OrganizationId).FirstAsync(ct), Name = "X-Ray Structural SAST", Code = "XRAY_REGEX_SAST" };
-            _db.SecurityScanners.Add(scan);
-            await _db.SaveChangesAsync(ct);
-        }
 
-        var result = await _db.SecurityScans.Include(s => s.Analysis).OrderByDescending(s => s.StartedAtUtc).FirstOrDefaultAsync(s => s.Analysis != null && s.Analysis.ProjectId == projectId, ct);
-        if (result is null)
-        {
-            result = await _projects.CreateProjectSecurityScanAsync(projectId, root, ct);
-        }
+        // Always run a fresh scan — previously this reused whatever scan already existed for the
+        // project, so "Run Security Scan" silently did nothing after the first run.
+        var result = await _projects.CreateProjectSecurityScanAsync(projectId, root, ct);
 
         return Ok(new ProjectSecurityScanResponse(result.SecurityScanId, projectId, result.FindingCount, result.StatusCode, result.StartedAtUtc ?? DateTime.UtcNow, result.CompletedAtUtc));
     }

@@ -7,6 +7,7 @@ import clsx from 'clsx';
 import dagre from 'dagre';
 import { api } from '../api/endpoints';
 import type { GraphResponse, ProjectNodeDetailResponse } from '../api/types';
+import { Loader } from '../components/Loader';
 import { useProjects } from '../state/ProjectContext';
 import { GraphLegend, GRAPH_TYPE_COLORS } from '../components/GraphLegend';
 
@@ -54,6 +55,12 @@ export default function ArchitecturePage() {
     staleTime: 30_000
   });
   const selectedNodeDetail: ProjectNodeDetailResponse | null = selectedNodeQuery.data ?? null;
+  const nodeExplainQuery = useQuery({
+    queryKey: ['graph-node-explain', projectId, selectedNodeId],
+    queryFn: () => api.explainNode(projectId!, selectedNodeId!),
+    enabled: false,
+    staleTime: 60_000
+  });
   const loading = graphQuery.isLoading;
   const error = graphQuery.error instanceof Error ? graphQuery.error.message : null;
 
@@ -117,7 +124,7 @@ export default function ArchitecturePage() {
       <div className="flex flex-1 gap-4">
         <div className="flex-1 overflow-hidden rounded-lg border border-border bg-card">
           {loading ? (
-            <div className="flex h-full items-center justify-center text-sm text-text-muted">Loading architecture...</div>
+            <Loader label="Loading architecture..." fullHeight />
           ) : error ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-text-muted">
               <span className="font-medium text-text-primary">Architecture unavailable</span>
@@ -246,6 +253,26 @@ export default function ArchitecturePage() {
                     <p className="mt-1 leading-relaxed">{selectedNodeDetail.whyThisMatters}</p>
                   </div>
                 )}
+
+                <div className="mt-4">
+                  <button
+                    type="button"
+                    onClick={() => void nodeExplainQuery.refetch()}
+                    disabled={nodeExplainQuery.isFetching}
+                    className="w-full rounded border border-primary/40 bg-primary/10 px-2 py-1.5 text-[11px] font-medium text-primary transition hover:bg-primary/20 disabled:opacity-60"
+                  >
+                    {nodeExplainQuery.isFetching ? 'Summarizing\u2026' : '\u2728 Explain'}
+                  </button>
+                  {nodeExplainQuery.isFetching && <Loader size="sm" />}
+                  {nodeExplainQuery.data && !nodeExplainQuery.isFetching && (
+                    <div className="mt-2 rounded border border-border bg-cardMuted p-2 text-[11px] leading-relaxed text-text-secondary">
+                      {nodeExplainQuery.data.degraded && (
+                        <p className="mb-1 text-[10px] uppercase tracking-wide text-text-muted">Simplified summary (AI not configured)</p>
+                      )}
+                      {nodeExplainQuery.data.summary}
+                    </div>
+                  )}
+                </div>
               </>
             )}
           </div>

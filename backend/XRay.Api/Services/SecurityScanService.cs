@@ -17,13 +17,13 @@ public class SecurityScanService
     private static readonly (string Code, string Name, string Severity, Regex Pattern)[] Rules =
     {
         ("HARDCODED_SECRET", "Hardcoded secret", "CRITICAL",
-            new Regex(@"(password|apikey|api_key|secret|connectionstring)\s*=\s*[""'][^""']{4,}[""']", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+            new Regex(@"(?<key>password|apikey|api_key|secret|connectionstring)[""']?\s*[:=]\s*[""'](?<value>[^""']{4,})[""']", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
         ("SQL_INJECTION", "SAST SQL Injection Potential", "CRITICAL",
             new Regex(@"(SELECT|INSERT|UPDATE|DELETE)[^;]*""\s*\+\s*\w+|\$""[^""]*(SELECT|INSERT|UPDATE|DELETE)[^""]*\{", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
         ("WEAK_ENCRYPTION", "Weak encryption", "MEDIUM",
-            new Regex(@"\b(MD5|DES|SHA1)\b", RegexOptions.Compiled)),
+            new Regex(@"\b(MD5(?:CryptoServiceProvider|Cng)?|SHA1(?:Managed|CryptoServiceProvider|Cng)?|DES(?:CryptoServiceProvider)?)\b", RegexOptions.Compiled)),
         ("INSECURE_DESERIALIZATION", "Insecure deserialization", "HIGH",
-            new Regex(@"BinaryFormatter|JavaScriptSerializer", RegexOptions.Compiled)),
+            new Regex(@"BinaryFormatter|JavaScriptSerializer|NetDataContractSerializer|LosFormatter", RegexOptions.Compiled)),
     };
 
     private readonly AppDbContext _db;
@@ -56,34 +56,7 @@ public class SecurityScanService
         };
         _db.SecurityScans.Add(scan);
 
-        var findingCount = 0;
-        foreach (var (graphNodeId, filePath, content) in filesToScan)
-        {
-            foreach (var rule in Rules)
-            {
-                var match = rule.Pattern.Match(content);
-                if (!match.Success) continue;
-
-                var rule_ = await GetOrCreateRuleAsync(scanner.SecurityScannerId, rule.Code, rule.Name, severityIds[rule.Severity], ct);
-                var lineNo = content[..match.Index].Count(c => c == '\n') + 1;
-
-                _db.SecurityFindings.Add(new SecurityFinding
-                {
-                    SecurityFindingId = Guid.NewGuid(),
-                    SecurityScanId = scan.SecurityScanId,
-                    SecurityRuleId = rule_.SecurityRuleId,
-                    GraphNodeId = graphNodeId,
-                    Title = rule.Name,
-                    Description = $"Pattern '{rule.Code}' matched in {filePath ?? "unknown file"} at line {lineNo}.",
-                    SourceLineStart = lineNo,
-                    SourceLineEnd = lineNo,
-                    Remediation = RemediationFor(rule.Code),
-                    StatusCode = "OPEN",
-                    CreatedAtUtc = DateTime.UtcNow,
-                });
-                findingCount++;
-            }
-        }
+        var findingCount = await ScanFilesAsync(scan.SecurityScanId, scanner.SecurityScannerId, severityIds, filesToScan, ct);
 
         scan.FindingCount = findingCount;
         await _db.SaveChangesAsync(ct);
@@ -164,38 +137,59 @@ public class SecurityScanService
         };
         _db.SecurityScans.Add(scan);
 
+        var findingCount = await ScanFilesAsync(scan.SecurityScanId, scanner.SecurityScannerId, severityIds, filesToScan, ct);
+
+        scan.FindingCount = findingCount;
+        await _db.SaveChangesAsync(ct);
+        return scan;
+    }
+
+    /// <summary>Shared by both scan entry points: reports every match per rule per file, not just the first.</summary>
+    private async Task<int> ScanFilesAsync(Guid scanId, Guid scannerId, Dictionary<string, byte> severityIds, IReadOnlyList<(Guid? GraphNodeId, string? FilePath, string Content)> filesToScan, CancellationToken ct)
+    {
         var findingCount = 0;
         foreach (var (graphNodeId, filePath, content) in filesToScan)
         {
             foreach (var rule in Rules)
             {
-                var match = rule.Pattern.Match(content);
-                if (!match.Success) continue;
-
-                var ruleEntity = await GetOrCreateRuleAsync(scanner.SecurityScannerId, rule.Code, rule.Name, severityIds[rule.Severity], ct);
-                var lineNo = content[..match.Index].Count(c => c == '\n') + 1;
-                _db.SecurityFindings.Add(new SecurityFinding
+                foreach (Match match in rule.Pattern.Matches(content))
                 {
-                    SecurityFindingId = Guid.NewGuid(),
-                    SecurityScanId = scan.SecurityScanId,
-                    SecurityRuleId = ruleEntity.SecurityRuleId,
-                    GraphNodeId = graphNodeId,
-                    CodeFileId = null,
-                    Title = rule.Name,
-                    Description = $"Pattern '{rule.Code}' matched in {filePath ?? "unknown file"} at line {lineNo}.",
-                    SourceLineStart = lineNo,
-                    SourceLineEnd = lineNo,
-                    Remediation = RemediationFor(rule.Code),
-                    StatusCode = "OPEN",
-                    CreatedAtUtc = DateTime.UtcNow,
-                });
-                findingCount++;
+                    if (rule.Code == "HARDCODED_SECRET" && LooksLikePlaceholderSecret(match)) continue;
+
+                    var ruleEntity = await GetOrCreateRuleAsync(scannerId, rule.Code, rule.Name, severityIds[rule.Severity], ct);
+                    var lineNo = content[..match.Index].Count(c => c == '\n') + 1;
+
+                    _db.SecurityFindings.Add(new SecurityFinding
+                    {
+                        SecurityFindingId = Guid.NewGuid(),
+                        SecurityScanId = scanId,
+                        SecurityRuleId = ruleEntity.SecurityRuleId,
+                        GraphNodeId = graphNodeId,
+                        Title = rule.Name,
+                        Description = $"Pattern '{rule.Code}' matched in {filePath ?? "unknown file"} at line {lineNo}.",
+                        SourceLineStart = lineNo,
+                        SourceLineEnd = lineNo,
+                        Remediation = RemediationFor(rule.Code),
+                        StatusCode = "OPEN",
+                        CreatedAtUtc = DateTime.UtcNow,
+                    });
+                    findingCount++;
+                }
             }
         }
+        return findingCount;
+    }
 
-        scan.FindingCount = findingCount;
-        await _db.SaveChangesAsync(ct);
-        return scan;
+    /// <summary>Avoids flagging our own documented placeholder convention (e.g. "REPLACE-WITH-YOUR-...") as a leaked secret.</summary>
+    private static bool LooksLikePlaceholderSecret(Match match)
+    {
+        var value = match.Groups["value"].Value;
+        return value.Contains("REPLACE-WITH-YOUR", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("YOUR-", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("YOUR_", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith('<')
+            || value.Equals("changeme", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("example", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<Dictionary<string, byte>> EnsureSeverityMapAsync(CancellationToken ct)

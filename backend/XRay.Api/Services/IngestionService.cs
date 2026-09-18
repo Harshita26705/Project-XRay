@@ -44,6 +44,7 @@ public class IngestionService
 
         if (request.LocalRepositoryPath is not null)
         {
+            EnsureLocalRepositoryPathAllowed(request.LocalRepositoryPath);
             repository.CloneUrl = $"file:///{request.LocalRepositoryPath.Replace('\\', '/')}";
         }
 
@@ -387,6 +388,31 @@ public class IngestionService
         catch
         {
             return null; // best-effort — a repo with no git history (or REST hiccup) shouldn't block ingestion
+        }
+    }
+
+    /// <summary>
+    /// If Ingestion:AllowedLocalRepositoryRoots is configured, rejects any caller-supplied path that
+    /// does not resolve (after normalizing "..") under one of those roots. An empty/missing allow-list
+    /// preserves today's unrestricted local-dev behavior.
+    /// </summary>
+    private void EnsureLocalRepositoryPathAllowed(string requestedPath)
+    {
+        var allowedRoots = _configuration.GetSection("Ingestion:AllowedLocalRepositoryRoots").Get<string[]>()
+                           ?? Array.Empty<string>();
+        if (allowedRoots.Length == 0) return;
+
+        var fullRequestedPath = Path.GetFullPath(requestedPath);
+        var allowed = allowedRoots.Any(root =>
+        {
+            var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return fullRequestedPath.Equals(fullRoot, StringComparison.OrdinalIgnoreCase)
+                   || fullRequestedPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        });
+
+        if (!allowed)
+        {
+            throw new InvalidOperationException("The requested local repository path is outside the configured allowed roots.");
         }
     }
 

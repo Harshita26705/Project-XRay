@@ -46,6 +46,48 @@ public class AzureDevOpsController : ControllerBase
         }
     }
 
+    [HttpGet("work-items")]
+    public async Task<ActionResult<IReadOnlyList<AzureDevOpsWorkItemResponse>>> WorkItems([FromQuery] int top, CancellationToken ct)
+    {
+        try
+        {
+            var organization = await ResolveOrganizationAsync(ct);
+            return Ok(await _azureDevOps.ListWorkItemsAsync(organization, top <= 0 ? 25 : top, ct));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpGet("work-items/{workItemId:int}")]
+    public async Task<ActionResult<AzureDevOpsWorkItemResponse>> WorkItem(int workItemId, CancellationToken ct)
+    {
+        try
+        {
+            var organization = await ResolveOrganizationAsync(ct);
+            return Ok(await _azureDevOps.GetWorkItemAsync(organization, workItemId, ct));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpGet("pull-requests/{pullRequestId:int}")]
+    public async Task<ActionResult<AzureDevOpsPullRequestResponse>> PullRequest(int pullRequestId, CancellationToken ct)
+    {
+        try
+        {
+            var organization = await ResolveOrganizationAsync(ct);
+            return Ok(await _azureDevOps.GetPullRequestAsync(organization, pullRequestId, ct));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     private async Task<Guid> ResolveOrganizationAsync(CancellationToken ct)
     {
         var user = await _currentUser.GetOrProvisionUserAsync(User, ct);

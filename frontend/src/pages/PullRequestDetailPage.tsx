@@ -4,6 +4,7 @@ import { api } from '../api/endpoints';
 import type { ChangeResponse } from '../api/types';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
+import { Loader } from '../components/Loader';
 import { RiskBadge } from '../components/RiskBadge';
 
 export default function PullRequestDetailPage() {
@@ -16,7 +17,7 @@ export default function PullRequestDetailPage() {
     void api.getChange(changeId).then(setChange);
   }, [changeId]);
 
-  if (!change) return <div className="text-sm text-text-muted">Loading...</div>;
+  if (!change) return <Loader label="Loading..." fullHeight />;
 
   return (
     <div className="space-y-5">

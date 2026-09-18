@@ -6,6 +6,8 @@ import type {
   IngestResponse,
   AzureDevOpsRepositoryResponse,
   AzureDevOpsBranchResponse,
+  AzureDevOpsWorkItemResponse,
+  AzureDevOpsPullRequestResponse,
   OverviewResponse,
   ChangeResponse,
   CreateChangeRequest,
@@ -15,6 +17,7 @@ import type {
   EvidenceResponse,
   SecurityFindingResponse,
   ExplainResponse,
+  NodeExplainResponse,
   ProjectNodeDetailResponse,
   ProjectSecurityScanResponse,
   ReportResponse,
@@ -41,9 +44,13 @@ export const api = {
   getGraph: (projectId: string, branchName?: string) =>
     get<GraphResponse>(`/projects/${projectId}/graph${branchName ? `?branch=${encodeURIComponent(branchName)}` : ''}`),
   getGraphNodeDetail: (projectId: string, nodeId: string) => get<ProjectNodeDetailResponse>(`/projects/${projectId}/graph/nodes/${nodeId}`),
+  explainNode: (projectId: string, nodeId: string) => get<NodeExplainResponse>(`/projects/${projectId}/graph/nodes/${nodeId}/explain`),
   getOverview: () => get<OverviewResponse>('/projects/overview'),
   listAzureDevOpsRepositories: () => get<AzureDevOpsRepositoryResponse[]>('/azure-devops/repositories'),
   listAzureDevOpsBranches: (repositoryId: string) => get<AzureDevOpsBranchResponse[]>(`/azure-devops/repositories/${encodeURIComponent(repositoryId)}/branches`),
+  listAzureDevOpsWorkItems: (top = 25) => get<AzureDevOpsWorkItemResponse[]>(`/azure-devops/work-items?top=${top}`),
+  getAzureDevOpsWorkItem: (workItemId: number | string) => get<AzureDevOpsWorkItemResponse>(`/azure-devops/work-items/${workItemId}`),
+  getAzureDevOpsPullRequest: (pullRequestId: number | string) => get<AzureDevOpsPullRequestResponse>(`/azure-devops/pull-requests/${pullRequestId}`),
 
   listChanges: (projectId: string) => get<ChangeResponse[]>(`/projects/${projectId}/changes`),
   getChange: (changeId: string) => get<ChangeResponse>(`/changes/${changeId}`),
@@ -66,7 +73,7 @@ export const api = {
   runProjectSecurityScan: (projectId: string) => post<ProjectSecurityScanResponse>(`/projects/${projectId}/security-scans`),
 
   listIntegrations: () => get<IntegrationConnectionResponse[]>('/integrations'),
-  upsertIntegration: (payload: { provider: string; displayName: string; externalBaseUrl?: string; externalTenantId?: string }) =>
+  upsertIntegration: (payload: { provider: string; displayName: string; externalBaseUrl?: string; externalTenantId?: string; personalAccessToken?: string }) =>
     post<IntegrationConnectionResponse>('/integrations', payload),
   testIntegration: (connectionId: string) => post<IntegrationConnectionResponse>(`/integrations/${connectionId}/test`),
 

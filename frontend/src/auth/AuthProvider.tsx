@@ -37,7 +37,7 @@ function DevBypassAuthProvider({ children }: { children: React.ReactNode }) {
   const getAccessToken = useCallback(async () => null, []);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ isAuthenticated, displayName: 'Harshita S.', isDevBypass: true, login, logout, getAccessToken }),
+    () => ({ isAuthenticated, displayName: 'Sayyed Amaan Ali', isDevBypass: true, login, logout, getAccessToken }),
     [isAuthenticated, login, logout, getAccessToken]
   );
 
@@ -103,6 +103,10 @@ function MsalBackedAuthProvider({ children }: { children: React.ReactNode }) {
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   if (!isAadConfigured) {
+    if (import.meta.env.PROD) {
+      // eslint-disable-next-line no-console
+      console.error('Azure AD is not configured in a production build — falling back to the local dev-bypass auth. This must not be used in a real deployment.');
+    }
     return <DevBypassAuthProvider>{children}</DevBypassAuthProvider>;
   }
   const pca = useMemo(() => new PublicClientApplication(msalConfig), []);

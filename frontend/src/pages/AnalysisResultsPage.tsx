@@ -5,6 +5,7 @@ import 'reactflow/dist/style.css';
 import { api } from '../api/endpoints';
 import type { AnalysisResponse, ExplainResponse, SecurityFindingResponse } from '../api/types';
 import { Card } from '../components/Card';
+import { Loader } from '../components/Loader';
 import { RiskBadge } from '../components/RiskBadge';
 import { Button } from '../components/Button';
 import { GraphLegend, GRAPH_RISK_COLORS } from '../components/GraphLegend';
@@ -28,7 +29,7 @@ export default function AnalysisResultsPage() {
   const { nodes, edges } = useMemo(() => buildGraph(analysis, focusNodeId), [analysis, focusNodeId]);
   const selectedNode = analysis?.nodes.find((node) => node.graphNodeId === (selectedNodeId ?? analysis.nodes[0]?.graphNodeId)) ?? analysis?.nodes[0] ?? null;
 
-  if (!analysis) return <div className="text-sm text-text-muted">Loading analysis...</div>;
+  if (!analysis) return <Loader label="Loading analysis..." fullHeight />;
 
   const exportAnalysis = async () => {
     setExporting(true);

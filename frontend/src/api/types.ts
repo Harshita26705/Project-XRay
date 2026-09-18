@@ -216,6 +216,11 @@ export interface ExplainResponse {
   degraded: boolean;
 }
 
+export interface NodeExplainResponse {
+  summary: string;
+  degraded: boolean;
+}
+
 export interface ReportSectionResponse {
   sectionType: string;
   title: string;
@@ -241,6 +246,27 @@ export interface IntegrationConnectionResponse {
   lastTestedAtUtc: string | null;
   isEnabled: boolean;
   externalBaseUrl: string | null;
+  hasPersonalAccessToken: boolean;
+}
+
+export interface AzureDevOpsWorkItemResponse {
+  id: number;
+  title: string;
+  workItemType: string | null;
+  state: string | null;
+  assignedTo: string | null;
+  description: string | null;
+}
+
+export interface AzureDevOpsPullRequestResponse {
+  id: number;
+  title: string;
+  description: string | null;
+  status: string | null;
+  createdBy: string | null;
+  sourceBranch: string | null;
+  targetBranch: string | null;
+  changedFilePaths: string[];
 }
 
 export interface AiConfigurationResponse {

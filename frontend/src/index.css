@@ -36,6 +36,16 @@ body {
   stroke-width: 2;
 }
 
+.xray-loader-path {
+  animation: xray-infinity-flow 1.4s linear infinite;
+}
+
+@keyframes xray-infinity-flow {
+  to {
+    stroke-dashoffset: -170;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

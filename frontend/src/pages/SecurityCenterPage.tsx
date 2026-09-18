@@ -3,6 +3,7 @@ import { api } from '../api/endpoints';
 import { useProjects } from '../state/ProjectContext';
 import type { ProjectSecurityScanResponse, SecurityFindingResponse } from '../api/types';
 import { Card } from '../components/Card';
+import { Loader } from '../components/Loader';
 import { StatusBadge } from '../components/StatusBadge';
 import { FilterSelect } from '../components/FilterSelect';
 import { EmptyState } from '../components/States';
@@ -23,6 +24,7 @@ export default function SecurityCenterPage() {
   const [severityFilter, setSeverityFilter] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [isScanning, setIsScanning] = useState(false);
+  const [isLoadingFindings, setIsLoadingFindings] = useState(true);
   const [scanHistory, setScanHistory] = useState<ProjectSecurityScanResponse[]>([]);
 
   const exportFindings = () => {
@@ -40,9 +42,14 @@ export default function SecurityCenterPage() {
 
   const loadFindings = async () => {
     if (!currentProject) return;
-    const data = await api.getSecurityFindings(currentProject.projectId);
-    setFindings(data);
-    setSelected(data[0] ?? null);
+    setIsLoadingFindings(true);
+    try {
+      const data = await api.getSecurityFindings(currentProject.projectId);
+      setFindings(data);
+      setSelected(data[0] ?? null);
+    } finally {
+      setIsLoadingFindings(false);
+    }
   };
 
   useEffect(() => {
@@ -123,7 +130,7 @@ export default function SecurityCenterPage() {
             </div>
           </div>
           {filtered.length === 0 ? (
-            <div className="p-5"><EmptyState title="No security findings" message="Compliance details and secret disclosures will populate here after running a scan." /></div>
+            <div className="p-5">{isLoadingFindings ? <Loader label="Loading findings..." /> : <EmptyState title="No security findings" message="Compliance details and secret disclosures will populate here after running a scan." />}</div>
           ) : (
             <table className="w-full text-left text-sm">
               <thead>

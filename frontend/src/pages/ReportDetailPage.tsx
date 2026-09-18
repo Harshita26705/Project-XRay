@@ -4,6 +4,7 @@ import { api } from '../api/endpoints';
 import type { ReportResponse } from '../api/types';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
+import { Loader } from '../components/Loader';
 
 export default function ReportDetailPage() {
   const { reportId } = useParams();
@@ -16,7 +17,7 @@ export default function ReportDetailPage() {
     void api.getReport(reportId).then(setReport);
   }, [reportId]);
 
-  if (!report) return <div className="text-sm text-text-muted">Loading...</div>;
+  if (!report) return <Loader label="Loading..." fullHeight />;
 
   const exportReport = async () => {
     if (!reportId) return;

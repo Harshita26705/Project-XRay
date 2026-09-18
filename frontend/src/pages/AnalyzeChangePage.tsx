@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProjects } from '../state/ProjectContext';
 import { api } from '../api/endpoints';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
+import { Loader } from '../components/Loader';
 import type { ChangeType } from '../api/types';
 
 const TABS: { key: ChangeType; label: string }[] = [
@@ -20,6 +21,10 @@ export default function AnalyzeChangePage() {
   const [title, setTitle] = useState('Add payment validation checks');
   const [description, setDescription] = useState('');
   const [filesText, setFilesText] = useState('');
+  const [fetchingWorkItem, setFetchingWorkItem] = useState(false);
+  const [workItemError, setWorkItemError] = useState<string | null>(null);
+  const [fetchingPullRequest, setFetchingPullRequest] = useState(false);
+  const [pullRequestError, setPullRequestError] = useState<string | null>(null);
   const [scope, setScope] = useState({
     scanDirectDependencies: true,
     traceTransitiveDependencies: true,
@@ -27,6 +32,48 @@ export default function AnalyzeChangePage() {
     runStaticSecurityAnalysis: true
   });
   const [busy, setBusy] = useState(false);
+
+  // Auto-fetch the work item's real title/description from Azure DevOps whenever the ID settles,
+  // so "Run X-Ray Analysis" always uses what's actually in DevOps rather than a stale/manual guess.
+  useEffect(() => {
+    if (tab !== 'WORK_ITEM' || !externalId.trim()) return;
+    const handle = setTimeout(() => {
+      setFetchingWorkItem(true);
+      setWorkItemError(null);
+      api.getAzureDevOpsWorkItem(externalId.trim())
+        .then((workItem) => {
+          setTitle(workItem.title);
+          setDescription(workItem.description ?? '');
+        })
+        .catch((reason: unknown) => {
+          setWorkItemError(reason instanceof Error ? reason.message : 'Unable to fetch this work item from Azure DevOps.');
+        })
+        .finally(() => setFetchingWorkItem(false));
+    }, 500);
+    return () => clearTimeout(handle);
+  }, [tab, externalId]);
+
+  // Same idea for pull requests: also auto-fills the changed file paths from the PR's actual diff.
+  useEffect(() => {
+    if (tab !== 'PULL_REQUEST' || !externalId.trim()) return;
+    const handle = setTimeout(() => {
+      setFetchingPullRequest(true);
+      setPullRequestError(null);
+      api.getAzureDevOpsPullRequest(externalId.trim())
+        .then((pullRequest) => {
+          setTitle(pullRequest.title);
+          setDescription(pullRequest.description ?? '');
+          if (pullRequest.changedFilePaths.length > 0) {
+            setFilesText(pullRequest.changedFilePaths.join('\n'));
+          }
+        })
+        .catch((reason: unknown) => {
+          setPullRequestError(reason instanceof Error ? reason.message : 'Unable to fetch this pull request from Azure DevOps.');
+        })
+        .finally(() => setFetchingPullRequest(false));
+    }, 500);
+    return () => clearTimeout(handle);
+  }, [tab, externalId]);
 
   const run = async () => {
     if (!currentProject) return;
@@ -51,6 +98,7 @@ export default function AnalyzeChangePage() {
       setBusy(false);
     }
   };
+
 
   return (
     <div className="space-y-6">
@@ -81,14 +129,29 @@ export default function AnalyzeChangePage() {
                 Azure DevOps Work Item ID
                 <input value={externalId} onChange={(e) => setExternalId(e.target.value)} className="mt-1 w-full rounded border border-border bg-cardMuted px-2 py-1.5 text-sm" />
               </label>
-              <p className="text-xs text-risk-safe">&#9679; Azure DevOps Connected</p>
+              {fetchingWorkItem ? (
+                <Loader size="sm" label="Fetching work item from Azure DevOps..." />
+              ) : workItemError ? (
+                <p className="text-xs text-risk-critical">Failed to fetch work item from Azure DevOps. Check the work item ID and your connection.</p>
+              ) : (
+                <p className="text-xs text-risk-safe">&#9679; Azure DevOps Connected</p>
+              )}
             </div>
           )}
           {tab === 'PULL_REQUEST' && (
-            <label className="block text-xs text-text-secondary">
-              Pull Request Number
-              <input value={externalId} onChange={(e) => setExternalId(e.target.value)} className="mt-1 w-full rounded border border-border bg-cardMuted px-2 py-1.5 text-sm" />
-            </label>
+            <div className="space-y-3">
+              <label className="block text-xs text-text-secondary">
+                Pull Request Number
+                <input value={externalId} onChange={(e) => setExternalId(e.target.value)} className="mt-1 w-full rounded border border-border bg-cardMuted px-2 py-1.5 text-sm" />
+              </label>
+              {fetchingPullRequest ? (
+                <Loader size="sm" label="Fetching pull request from Azure DevOps..." />
+              ) : pullRequestError ? (
+                <p className="text-xs text-risk-critical">Failed to fetch pull request from Azure DevOps. Check the PR number and your connection.</p>
+              ) : (
+                <p className="text-xs text-risk-safe">&#9679; Azure DevOps Connected</p>
+              )}
+            </div>
           )}
 
           <label className="mt-3 block text-xs text-text-secondary">

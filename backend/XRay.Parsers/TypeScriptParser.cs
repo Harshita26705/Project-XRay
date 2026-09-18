@@ -9,13 +9,16 @@ namespace XRay.Parsers;
 /// </summary>
 public partial class TypeScriptParser
 {
-    [GeneratedRegex(@"import\s+(?:[\w*{}\s,]+)\s+from\s+['""](\.[^'""]+)['""]", RegexOptions.Compiled)]
+    [GeneratedRegex(@"import\s+type\s*(?:[\w*{}\s,]+)\s+from\s+['""](\.[^'""]+)['""]|import\s+(?:[\w*{}\s,]+)\s+from\s+['""](\.[^'""]+)['""]", RegexOptions.Compiled)]
     private static partial Regex ImportRegex();
 
-    [GeneratedRegex(@"(?:fetch|axios(?:\.(?:get|post|put|delete|patch))?)\s*\(\s*[`'""]([^`'""]+)[`'""]", RegexOptions.Compiled)]
+    [GeneratedRegex(@"(?<!\.)\bimport\s*\(\s*['""](\.[^'""]+)['""]\s*\)", RegexOptions.Compiled)]
+    private static partial Regex DynamicImportRegex();
+
+    [GeneratedRegex(@"(?:fetch|axios(?:\.(?<verb>get|post|put|delete|patch))?)\s*\(\s*[`'""](?<url>[^`'""]+)[`'""]", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
     private static partial Regex HttpCallRegex();
 
-    [GeneratedRegex(@"\b(GET|POST|PUT|DELETE|PATCH)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    [GeneratedRegex(@"\bmethod\s*:\s*['""](GET|POST|PUT|DELETE|PATCH)['""]", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
     private static partial Regex VerbHintRegex();
 
     public ParseResult Parse(string relativeFilePath, string sourceText)
@@ -30,52 +33,80 @@ public partial class TypeScriptParser
 
         nodes.Add(new ParsedNode(selfKey, componentType, Path.GetFileNameWithoutExtension(relativeFilePath), relativeFilePath, 1, null));
 
-        var lines = sourceText.Split('\n');
-        for (var i = 0; i < lines.Length; i++)
+        // Matched against the whole file (not line-by-line) so multi-line imports/calls aren't missed.
+        foreach (Match m in ImportRegex().Matches(sourceText))
         {
-            var line = lines[i];
-            var lineNo = i + 1;
+            var rawImport = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+            var importPath = ResolveRelativeImport(relativeFilePath, rawImport);
+            edges.Add(new ParsedEdge(
+                selfKey, $"MODULE:{importPath}", GraphEdgeTypeCodes.Imports, 0.9m,
+                "typescript.import", relativeFilePath, CountLines(sourceText, m.Index) + 1));
+        }
 
-            foreach (Match m in ImportRegex().Matches(line))
-            {
-                var importPath = ResolveRelativeImport(relativeFilePath, m.Groups[1].Value);
-                edges.Add(new ParsedEdge(
-                    selfKey, $"MODULE:{importPath}", GraphEdgeTypeCodes.Imports, 0.9m,
-                    "typescript.import", relativeFilePath, lineNo));
-            }
+        foreach (Match m in DynamicImportRegex().Matches(sourceText))
+        {
+            var importPath = ResolveRelativeImport(relativeFilePath, m.Groups[1].Value);
+            edges.Add(new ParsedEdge(
+                selfKey, $"MODULE:{importPath}", GraphEdgeTypeCodes.Imports, 0.85m,
+                "typescript.dynamic_import", relativeFilePath, CountLines(sourceText, m.Index) + 1));
+        }
 
-            foreach (Match m in HttpCallRegex().Matches(line))
-            {
-                var url = m.Groups[1].Value;
-                var path = NormalizeApiPath(url);
-                var verbMatch = VerbHintRegex().Match(line);
-                var verb = verbMatch.Success ? verbMatch.Value.ToUpperInvariant() : "GET";
-                var apiKey = $"API:{verb} {path}";
+        foreach (Match m in HttpCallRegex().Matches(sourceText))
+        {
+            var path = NormalizeApiPath(m.Groups["url"].Value);
+            var verb = ResolveHttpVerb(m, sourceText);
+            var apiKey = $"API:{verb} {path}";
 
-                edges.Add(new ParsedEdge(
-                    selfKey, apiKey, GraphEdgeTypeCodes.Calls, 0.7m,
-                    "typescript.http_call", relativeFilePath, lineNo, IsRuntimeResolved: true));
-            }
+            edges.Add(new ParsedEdge(
+                selfKey, apiKey, GraphEdgeTypeCodes.Calls, 0.7m,
+                "typescript.http_call", relativeFilePath, CountLines(sourceText, m.Index) + 1, IsRuntimeResolved: true));
         }
 
         return new ParseResult(nodes, edges, errors);
     }
 
+    /// <summary>Prefers the explicit axios.verb() call over a nearby `method: '...'` hint, then defaults to GET.</summary>
+    private static string ResolveHttpVerb(Match httpCallMatch, string sourceText)
+    {
+        if (httpCallMatch.Groups["verb"].Success) return httpCallMatch.Groups["verb"].Value.ToUpperInvariant();
+
+        var windowEnd = Math.Min(sourceText.Length, httpCallMatch.Index + 300);
+        var window = sourceText[httpCallMatch.Index..windowEnd];
+        var hint = VerbHintRegex().Match(window);
+        return hint.Success ? hint.Groups[1].Value.ToUpperInvariant() : "GET";
+    }
+
+    private static int CountLines(string text, int upToIndex) =>
+        text[..Math.Min(upToIndex, text.Length)].Count(c => c == '\n');
+
+    /// <summary>Pure string-segment resolution (no filesystem/CWD dependence) so duplicate directory names in the path can't confuse it.</summary>
     private static string ResolveRelativeImport(string fromFile, string relativeImport)
     {
-        var dir = Path.GetDirectoryName(fromFile.Replace('/', Path.DirectorySeparatorChar)) ?? "";
-        var combined = Path.GetFullPath(Path.Combine(dir, relativeImport)).Replace('\\', '/');
-        // Strip any drive-root artifacts introduced by GetFullPath when the input is already relative.
-        var marker = fromFile.Split('/')[0];
-        var idx = combined.IndexOf(marker, StringComparison.Ordinal);
-        return idx >= 0 ? combined[idx..] : relativeImport;
+        var segments = fromFile.Replace('\\', '/').Split('/').ToList();
+        if (segments.Count > 0) segments.RemoveAt(segments.Count - 1); // drop the file name, keep the directory
+
+        foreach (var segment in relativeImport.Replace('\\', '/').Split('/'))
+        {
+            if (segment.Length == 0 || segment == ".") continue;
+            if (segment == "..")
+            {
+                if (segments.Count > 0) segments.RemoveAt(segments.Count - 1);
+            }
+            else
+            {
+                segments.Add(segment);
+            }
+        }
+
+        return string.Join("/", segments);
     }
 
     private static string NormalizeApiPath(string url)
     {
-        // Strip origin/template noise like `${API_BASE}/api/payments/${id}` -> /api/payments/:id
+        // Strip origin/template noise like `${API_BASE}/api/payments/${id}` -> /api/payments/:param
         var withoutTemplate = Regex.Replace(url, @"\$\{[^}]+\}", ":param");
-        var idx = withoutTemplate.IndexOf("/api", StringComparison.OrdinalIgnoreCase);
-        return idx >= 0 ? withoutTemplate[idx..] : withoutTemplate;
+        var withoutQuery = withoutTemplate.Split('?')[0];
+        var idx = withoutQuery.IndexOf("/api", StringComparison.OrdinalIgnoreCase);
+        return idx >= 0 ? withoutQuery[idx..] : withoutQuery;
     }
 }

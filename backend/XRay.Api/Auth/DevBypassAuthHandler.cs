@@ -29,8 +29,8 @@ public class DevBypassAuthHandler : AuthenticationHandler<DevBypassAuthOptions>
         var claims = new[]
         {
             new Claim(ClaimTypes.NameIdentifier, "dev-local-user"),
-            new Claim(ClaimTypes.Name, "Harshita S. (Dev Bypass)"),
-            new Claim(ClaimTypes.Email, "harshita@dev.local"),
+            new Claim(ClaimTypes.Name, "Sayyed Amaan Ali (Dev Bypass)"),
+            new Claim(ClaimTypes.Email, "sayyed.amaan.ali@dev.local"),
         };
         var identity = new ClaimsIdentity(claims, SchemeName);
         var principal = new ClaimsPrincipal(identity);

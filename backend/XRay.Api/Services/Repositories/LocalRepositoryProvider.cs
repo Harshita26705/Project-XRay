@@ -91,7 +91,13 @@ public class LocalRepositoryProvider : IRepositoryProvider
     public async Task<string> GetFileContentAsync(RepositoryConnectionInfo connection, string branchName, string relativePath, CancellationToken ct = default)
     {
         var root = RequireRoot(connection);
-        var fullPath = Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar));
+        var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var fullPath = Path.GetFullPath(Path.Combine(fullRoot, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+        if (!fullPath.Equals(fullRoot, StringComparison.OrdinalIgnoreCase) &&
+            !fullPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Resolved file path escapes the repository root.");
+        }
         return await File.ReadAllTextAsync(fullPath, ct);
     }
 

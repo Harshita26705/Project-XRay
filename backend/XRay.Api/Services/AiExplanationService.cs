@@ -158,27 +158,91 @@ public class AiExplanationService
 
     private async Task<string?> CallGeminiAsync(string endpoint, string apiKey, string model, List<string> critical, int riskyCount, string? focus, CancellationToken ct)
     {
+        var prompt = $"You are explaining a deterministic software change-impact analysis. Use only these verified facts. " +
+                     $"Directly affected components: {string.Join(", ", critical.DefaultIfEmpty("none"))}. " +
+                     $"Transitive risky components: {riskyCount}. " +
+                     (string.IsNullOrWhiteSpace(focus) ? "" : $"Requested focus: {focus}. ") +
+                     "Respond in two concise sentences. Do not invent components, dependencies, vulnerabilities, or risk states.";
+        return await SendGeminiPromptAsync(endpoint, apiKey, model, "You are a precise, evidence-bound software analysis assistant.", prompt, ct);
+    }
+
+    /// <summary>Produces a plain-English "what is this and what does it connect to" summary for a single graph node.</summary>
+    public async Task<NodeExplainResponse> ExplainNodeAsync(string displayName, string componentType, string? filePath, string? fileContent, IReadOnlyList<string> contains, IReadOnlyList<string> dependsOn, IReadOnlyList<string> dependedOnBy, CancellationToken ct = default)
+    {
+        var endpoint = _configuration["Gemini:Endpoint"] ?? "https://generativelanguage.googleapis.com/v1beta";
+        var apiKey = _configuration["Gemini:ApiKey"];
+        var model = _configuration["Gemini:Model"] ?? "gemini-2.5-flash";
+        var degraded = IsPlaceholder(apiKey);
+
+        string? summary = null;
+        if (!degraded)
+        {
+            var prompt = !string.IsNullOrWhiteSpace(fileContent)
+                ? BuildFileContentPrompt(displayName, componentType, filePath!, fileContent)
+                : BuildStructuralPrompt(displayName, componentType, filePath, contains, dependsOn, dependedOnBy);
+            summary = await SendGeminiPromptAsync(endpoint, apiKey!, model, "You explain source code and software architecture in simple English for a non-technical audience, strictly grounded in what is given to you.", prompt, ct);
+        }
+
+        summary ??= BuildDeterministicNodeSummary(displayName, componentType, filePath, contains, dependsOn, dependedOnBy);
+        return new NodeExplainResponse(summary, degraded || summary is null);
+    }
+
+    /// <summary>Feeds the actual source file to the model so the explanation is grounded in what the code does, not just graph metadata.</summary>
+    private static string BuildFileContentPrompt(string displayName, string componentType, string filePath, string fileContent)
+    {
+        const int maxChars = 8000;
+        var truncated = fileContent.Length > maxChars ? fileContent[..maxChars] + "\n... (truncated)" : fileContent;
+        return $"Explain what the code below does, in simple, plain English for a non-technical reader. " +
+               $"Base your explanation ONLY on the code shown between the markers \u2014 do not invent behavior that isn't there. " +
+               $"Component: {displayName} ({componentType}), file: {filePath}.\n\n" +
+               $"--- CODE START ---\n{truncated}\n--- CODE END ---\n\n" +
+               "Respond in 3-5 short sentences, no jargon, no markdown, describing only what this file's code does.";
+    }
+
+    private static string BuildStructuralPrompt(string displayName, string componentType, string? filePath, IReadOnlyList<string> contains, IReadOnlyList<string> dependsOn, IReadOnlyList<string> dependedOnBy)
+    {
+        return $"Explain what this software component is and what it connects to, in simple, plain English for a non-technical reader. " +
+               $"Use only these verified structural facts \u2014 do not invent anything beyond them. " +
+               $"Name: {displayName}. Type: {componentType}. " +
+               (filePath is null ? "" : $"File: {filePath}. ") +
+               (contains.Count == 0 ? "" : $"Contains: {string.Join(", ", contains)}. ") +
+               $"Depends on {dependsOn.Count} other component(s){(dependsOn.Count == 0 ? "" : $": {string.Join(", ", dependsOn.Take(5))}")}. " +
+               $"Is depended on by {dependedOnBy.Count} other component(s){(dependedOnBy.Count == 0 ? "" : $": {string.Join(", ", dependedOnBy.Take(5))}")}. " +
+               "Respond in 2-3 short sentences, no jargon, no markdown.";
+    }
+
+    private static string BuildDeterministicNodeSummary(string displayName, string componentType, string? filePath, IReadOnlyList<string> contains, IReadOnlyList<string> dependsOn, IReadOnlyList<string> dependedOnBy)
+    {
+        var kind = componentType.Replace('_', ' ').ToLowerInvariant();
+        var location = filePath is null ? "" : $" defined in {filePath}";
+        var deps = dependsOn.Count == 0 ? "does not depend on any other tracked component" : $"depends on {dependsOn.Count} other component(s)";
+        var dependents = dependedOnBy.Count == 0 ? "nothing else currently depends on it" : $"{dependedOnBy.Count} other component(s) depend on it";
+        return $"{displayName} is a {kind}{location}. It {deps}, and {dependents}.";
+    }
+
+    private async Task<string?> SendGeminiPromptAsync(string endpoint, string apiKey, string model, string systemPrompt, string userPrompt, CancellationToken ct)
+    {
         try
         {
             var client = _httpClientFactory.CreateClient();
             client.Timeout = TimeSpan.FromSeconds(10);
-            var prompt = $"You are explaining a deterministic software change-impact analysis. Use only these verified facts. " +
-                         $"Directly affected components: {string.Join(", ", critical.DefaultIfEmpty("none"))}. " +
-                         $"Transitive risky components: {riskyCount}. " +
-                         (string.IsNullOrWhiteSpace(focus) ? "" : $"Requested focus: {focus}. ") +
-                         "Respond in two concise sentences. Do not invent components, dependencies, vulnerabilities, or risk states.";
             var payload = new
             {
-                systemInstruction = new { parts = new[] { new { text = "You are a precise, evidence-bound software analysis assistant." } } },
-                contents = new[] { new { role = "user", parts = new[] { new { text = prompt } } } },
+                systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
+                contents = new[] { new { role = "user", parts = new[] { new { text = userPrompt } } } },
                 generationConfig = new
                 {
                     temperature = _configuration.GetValue("Gemini:Temperature", 0.2),
                     maxOutputTokens = _configuration.GetValue("Gemini:MaxOutputTokens", 200)
                 }
             };
-            var url = $"{endpoint.TrimEnd('/')}/models/{Uri.EscapeDataString(model)}:generateContent?key={Uri.EscapeDataString(apiKey)}";
-            using var response = await client.PostAsJsonAsync(url, payload, ct);
+            var url = $"{endpoint.TrimEnd('/')}/models/{Uri.EscapeDataString(model)}:generateContent";
+            using var requestMessage = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = JsonContent.Create(payload)
+            };
+            requestMessage.Headers.Add("x-goog-api-key", apiKey);
+            using var response = await client.SendAsync(requestMessage, ct);
             if (!response.IsSuccessStatusCode) return null;
             var json = await response.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>(cancellationToken: ct);
             if (!json.TryGetProperty("candidates", out var candidates) || candidates.GetArrayLength() == 0) return null;

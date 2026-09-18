@@ -6,10 +6,10 @@ using XRay.Infrastructure.Persistence;
 namespace XRay.Api.Services;
 
 /// <summary>
-/// Manages IntegrationConnection records. Azure DevOps and Microsoft Foundry get a real (best-effort)
-/// connectivity check when configured; the remaining providers (Azure AI Search, Teams, Power
-/// Automate) are modeled with connection state but "Test Connection" is simulated, per the plan's
-/// documented integration-depth tradeoff.
+/// Manages IntegrationConnection records. "Test Connection" performs a real HTTP reachability probe
+/// against the connection's configured base URL for every provider (Azure DevOps, Microsoft Foundry,
+/// Azure AI Search, Microsoft Teams, Power Automate). This confirms the endpoint is reachable; it
+/// does not perform provider-specific authenticated calls.
 /// </summary>
 public class IntegrationService
 {
@@ -27,7 +27,7 @@ public class IntegrationService
         var providers = await _db.IntegrationProviders.ToDictionaryAsync(p => p.Id, p => p.Code, ct);
         var connections = await _db.IntegrationConnections.Where(c => c.OrganizationId == organizationId).ToListAsync(ct);
         return connections.Select(c => new IntegrationConnectionResponse(
-            c.IntegrationConnectionId, providers.GetValueOrDefault(c.IntegrationProviderId, "UNKNOWN"), c.DisplayName, c.StatusCode, c.LastTestedAtUtc, c.IsEnabled, c.ExternalBaseUrl)).ToList();
+            c.IntegrationConnectionId, providers.GetValueOrDefault(c.IntegrationProviderId, "UNKNOWN"), c.DisplayName, c.StatusCode, c.LastTestedAtUtc, c.IsEnabled, c.ExternalBaseUrl, !string.IsNullOrWhiteSpace(c.PersonalAccessToken))).ToList();
     }
 
     public async Task<IntegrationConnectionResponse> CreateOrUpdateAsync(Guid organizationId, CreateIntegrationRequest request, CancellationToken ct = default)
@@ -55,10 +55,16 @@ public class IntegrationService
 
         connection.ExternalBaseUrl = request.ExternalBaseUrl;
         connection.ExternalTenantId = request.ExternalTenantId;
+        // Write-only: only overwrite when a new value is actually submitted, so re-saving the
+        // endpoint URL doesn't blank out a PAT the caller didn't intend to change.
+        if (!string.IsNullOrWhiteSpace(request.PersonalAccessToken))
+        {
+            connection.PersonalAccessToken = request.PersonalAccessToken;
+        }
         connection.UpdatedAtUtc = DateTime.UtcNow;
 
         await _db.SaveChangesAsync(ct);
-        return new IntegrationConnectionResponse(connection.IntegrationConnectionId, request.Provider, connection.DisplayName, connection.StatusCode, connection.LastTestedAtUtc, connection.IsEnabled, connection.ExternalBaseUrl);
+        return new IntegrationConnectionResponse(connection.IntegrationConnectionId, request.Provider, connection.DisplayName, connection.StatusCode, connection.LastTestedAtUtc, connection.IsEnabled, connection.ExternalBaseUrl, !string.IsNullOrWhiteSpace(connection.PersonalAccessToken));
     }
 
     public async Task<IntegrationConnectionResponse> TestConnectionAsync(Guid connectionId, CancellationToken ct = default)
@@ -69,8 +75,10 @@ public class IntegrationService
 
         var ok = providerCode switch
         {
-            "AZURE_DEVOPS" or "MICROSOFT_FOUNDRY" => await ProbeHttpEndpointAsync(connection.ExternalBaseUrl, ct),
-            _ => true, // simulated success for AI Search / Teams / Power Automate in this first pass
+            "AZURE_DEVOPS" => await ProbeHttpEndpointAsync(connection.ExternalBaseUrl, ct, connection.PersonalAccessToken),
+            "MICROSOFT_FOUNDRY" or "AZURE_AI_SEARCH" or "MICROSOFT_TEAMS" or "POWER_AUTOMATE"
+                => await ProbeHttpEndpointAsync(connection.ExternalBaseUrl, ct),
+            _ => false,
         };
 
         connection.StatusCode = ok ? "CONNECTED" : "ERROR";
@@ -78,17 +86,23 @@ public class IntegrationService
         connection.LastError = ok ? null : "Could not reach the configured endpoint.";
         await _db.SaveChangesAsync(ct);
 
-        return new IntegrationConnectionResponse(connection.IntegrationConnectionId, providerCode, connection.DisplayName, connection.StatusCode, connection.LastTestedAtUtc, connection.IsEnabled, connection.ExternalBaseUrl);
+        return new IntegrationConnectionResponse(connection.IntegrationConnectionId, providerCode, connection.DisplayName, connection.StatusCode, connection.LastTestedAtUtc, connection.IsEnabled, connection.ExternalBaseUrl, !string.IsNullOrWhiteSpace(connection.PersonalAccessToken));
     }
 
-    private async Task<bool> ProbeHttpEndpointAsync(string? baseUrl, CancellationToken ct)
+    private async Task<bool> ProbeHttpEndpointAsync(string? baseUrl, CancellationToken ct, string? personalAccessToken = null)
     {
         if (string.IsNullOrWhiteSpace(baseUrl)) return false;
         try
         {
             var client = _httpClientFactory.CreateClient();
             client.Timeout = TimeSpan.FromSeconds(5);
-            var response = await client.GetAsync(baseUrl, ct);
+            using var request = new HttpRequestMessage(HttpMethod.Get, baseUrl);
+            if (!string.IsNullOrWhiteSpace(personalAccessToken))
+            {
+                var basicAuth = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes($":{personalAccessToken}"));
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", basicAuth);
+            }
+            var response = await client.SendAsync(request, ct);
             return (int)response.StatusCode < 500;
         }
         catch

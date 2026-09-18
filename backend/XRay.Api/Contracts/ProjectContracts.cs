@@ -37,6 +37,8 @@ public record ProjectNodeDetailResponse(
 
 public record ProjectSecurityScanResponse(Guid SecurityScanId, Guid ProjectId, int FindingCount, string Status, DateTime StartedAtUtc, DateTime? CompletedAtUtc);
 
+public record NodeExplainResponse(string Summary, bool Degraded);
+
 public record GraphResponse(Guid? SnapshotId, IReadOnlyList<GraphNodeResponse> Nodes, IReadOnlyList<GraphEdgeResponse> Edges);
 
 public record IngestRequest(string? LocalRepositoryPath, string? BranchName);

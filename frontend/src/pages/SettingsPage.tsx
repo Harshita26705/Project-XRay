@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { api } from '../api/endpoints';
 import type { AiConfigurationResponse, OrganizationSettingsResponse } from '../api/types';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
+import { Loader } from '../components/Loader';
 import { StatusBadge } from '../components/StatusBadge';
 import { useProjects } from '../state/ProjectContext';
 
-const NAV = ['General', 'Projects', 'Security', 'AI Settings', 'Notifications'] as const;
+const NAV = ['General', 'AI Settings', 'Notifications'] as const;
 type Tab = (typeof NAV)[number];
 
 export default function SettingsPage() {
@@ -106,32 +106,6 @@ export default function SettingsPage() {
   ], []);
 
   const renderContent = () => {
-    if (activeTab === 'Projects') {
-      return (
-        <div className="space-y-5">
-          <Card className="p-4">
-            <h3 className="mb-3 text-sm font-semibold">Project Management</h3>
-            <p className="text-sm text-text-secondary">Manage the project catalog, repository bindings, and default project routing from the dedicated project workspace.</p>
-            <div className="mt-4">
-              <Link to="/projects" className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white">Open Projects</Link>
-            </div>
-          </Card>
-        </div>
-      );
-    }
-
-    if (activeTab === 'Security') {
-      return (
-        <div className="space-y-5">
-          <Card className="p-4">
-            <h3 className="mb-3 text-sm font-semibold">Security Defaults</h3>
-            <ToggleRow label="Include security scan" checked={settings?.includeSecurityScan ?? false} onChange={(v) => settings && setSettings({ ...settings, includeSecurityScan: v })} />
-            <ToggleRow label="Fail analysis on critical security findings" checked={true} onChange={() => undefined} />
-          </Card>
-        </div>
-      );
-    }
-
     if (activeTab === 'AI Settings') {
       return (
         <div className="space-y-5">
@@ -335,14 +309,14 @@ export default function SettingsPage() {
       {error && <div className="rounded-md border border-risk-critical/40 bg-risk-critical/10 p-3 text-sm text-risk-critical">{error}</div>}
       {message && <div className="rounded-md border border-risk-safe/40 bg-risk-safe/10 p-3 text-sm text-risk-safe">{message}</div>}
 
-      {loading ? <div className="text-sm text-text-muted">Loading settings...</div> : (
+      {loading ? <Loader label="Loading settings..." /> : (
         <div className="grid grid-cols-5 gap-6">
           <div className="space-y-1 text-sm">
             {NAV.map((item) => (
               <button
                 key={item}
                 type="button"
-                onClick={() => item === 'Projects' || item === 'Security' ? window.location.assign(item === 'Projects' ? '/projects' : '/security') : setActiveTab(item)}
+                onClick={() => setActiveTab(item)}
                 className={`block w-full rounded px-3 py-1.5 text-left ${activeTab === item ? 'bg-primary-muted text-white' : 'text-text-secondary hover:bg-cardMuted'}`}
               >
                 {item}
